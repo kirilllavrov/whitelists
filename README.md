@@ -195,7 +195,7 @@ cd tools
 python check-domains.py
 
 # Проверка с настройками
-python check-domains.py ..\src\domains -c 10 -e category-gov-ru --dns 8.8.8.8 1.1.1.1
+python check-domains.py ..\src\domains -c 10 -e category-gov-ru --dns 77.88.8.8 77.88.8.1
 
 # Тихий режим
 python check-domains.py -q
@@ -318,11 +318,11 @@ yandex.ru
 
 ## 🔍 Примеры использования
 
-### Сценарий 1: Проверка для конкретного оператора
+### Сценарий 1: Проверка для конкретного оператора с кастомными DNS-серверами 
 
 ```bash
 cd tools
-python3 check-domains.py -c 15 --dns 8.8.8.8
+python3 check-domains.py -c 15 --dns 77.88.8.8
 # После проверки выберите оператора (например, 1 для Megafon)
 # Результат: whitelist-01-01-2025-12-00-00-Megafon.txt
 ```
