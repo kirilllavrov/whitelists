@@ -46,8 +46,16 @@ whitelists/
 │   ├── domains_checked/        # Whitelist'ы по операторам
 │   └── IP_checked/             # Доступные IP-адреса
 └── release/                    # Финальные списки (создаётся автоматически)
-    └── whitelist.txt           # Итоговый объединённый whitelist
+    ├── whitelist.txt           # Итоговый объединённый whitelist с доменами
+    └── IP-whitelist.txt        # Итоговый объединённый whitelist с IP адресами в CIDR
 ```
+## ✅ Актуальные данные
+
+### Проверенные домены
+-  [`whitelist.txt`](https://raw.githubusercontent.com/kirilllavrov/whitelists/refs/heads/main/release/whitelist.txt)
+
+### Проверенные IP-адреса
+-  [`IP-whitelist.txt`](https://raw.githubusercontent.com/kirilllavrov/whitelists/refs/heads/main/release/IP-whitelist.txt)
 
 ## 🚀 Быстрый старт
 
