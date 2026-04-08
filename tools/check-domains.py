@@ -27,9 +27,9 @@ logging.getLogger('httpcore').setLevel(logging.CRITICAL)
 
 # === КОНФИГУРАЦИЯ ===
 CONFIG = {
-    "timeout_connect": 90,       # Таймаут подключения (сек)
-    "timeout_total": 120,        # Общий таймаут запроса (сек)
-    "timeout_dns": 40,           # Таймаут DNS-резолвинга (сек)
+    "timeout_connect": 40,       # Таймаут подключения (сек)
+    "timeout_total": 60,         # Общий таймаут запроса (сек)
+    "timeout_dns": 10,           # Таймаут DNS-резолвинга (сек)
     "concurrency": 5,            # Количество параллельных запросов
     "headers": {
         "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
