@@ -88,7 +88,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Установите зависимости для check-domains.py
-pip install aiohttp httpx aiodns
+pip install aiohttp httpx aiodns aioquic
 
 # Для check_ips.py дополнительные зависимости не требуются
 ```
