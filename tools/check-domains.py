@@ -418,7 +418,7 @@ async def run_checker(domains: List[str],
         domain, resolved, ips = await coro
         dns_results[domain] = (resolved, ips)
         completed += 1
-        if verbose and completed % 200 == 0:
+        if verbose and completed % 50 == 0:
             print(f"  → DNS: {completed}/{len(domains)}")
 
     dns_ok = sum(1 for v in dns_results.values() if v[0])
