@@ -2,7 +2,7 @@ name: Weekly Merge Whitelist
 
 on:
   schedule:
-    - cron: '0 0 * * 1'   # Каждый понедельник в 00:00 UTC
+    - cron: '0 0 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -30,21 +30,20 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
 
-          # Подтягиваем main
           git fetch origin main
 
-          # 💥 Полная очистка рабочей директории
+          # Полная очистка
           git reset --hard
           git clean -fdx
 
           # Переключаемся на main
-          git checkout main
+          git checkout -B main origin/main
 
-          # Восстанавливаем путь release/
+          # Создаём release/
           mkdir -p release
 
-          # Переносим whitelist.txt из develop
-          git checkout develop -- release/whitelist.txt
+          # Копируем файл напрямую из develop-рабочей директории
+          cp ../release/whitelist.txt release/whitelist.txt
 
           git add release/whitelist.txt || true
 
