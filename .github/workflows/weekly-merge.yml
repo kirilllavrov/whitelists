@@ -2,16 +2,15 @@ name: Weekly Merge Whitelist
 
 on:
   schedule:
-    # Запуск каждый понедельник в 00:00 UTC
-    - cron: '0 0 * * 1'
-  workflow_dispatch: # Позволяет запустить вручную через интерфейс GitHub
+    - cron: '0 0 * * 1'   # Каждый понедельник в 00:00 UTC
+  workflow_dispatch:
 
 jobs:
   merge-whitelist:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout develop
         uses: actions/checkout@v4
         with:
           ref: develop
@@ -21,21 +20,31 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Run merged.py script
+      - name: Run merged.py
         run: |
           cd tools
           python merged.py
 
-      - name: Push changes to main branch
+      - name: Push changes to main
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
-          # Переключаемся на ветку main
+
+          # Подтягиваем main
           git fetch origin main
+
+          # 💥 Полная очистка рабочей директории, чтобы checkout не падал
+          git reset --hard
+          git clean -fdx
+
+          # Переключаемся на main
           git checkout main
-          
+
+          # Копируем whitelist из develop
+          git checkout develop -- release/whitelist.txt
+
           git add release/whitelist.txt || true
+
           if ! git diff --staged --quiet; then
             git commit -m "🤖 Auto-update: weekly whitelist merge"
             git push origin main
