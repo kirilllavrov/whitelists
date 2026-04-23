@@ -33,14 +33,17 @@ jobs:
           # Подтягиваем main
           git fetch origin main
 
-          # 💥 Полная очистка рабочей директории, чтобы checkout не падал
+          # 💥 Полная очистка рабочей директории
           git reset --hard
           git clean -fdx
 
           # Переключаемся на main
           git checkout main
 
-          # Копируем whitelist из develop
+          # Восстанавливаем путь release/
+          mkdir -p release
+
+          # Переносим whitelist.txt из develop
           git checkout develop -- release/whitelist.txt
 
           git add release/whitelist.txt || true
