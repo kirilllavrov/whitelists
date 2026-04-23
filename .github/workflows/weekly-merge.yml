@@ -25,27 +25,29 @@ jobs:
           cd tools
           python merged.py
 
-      - name: Push changes to main
+      - name: Save whitelist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whitelist
+          path: release/whitelist.txt
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download whitelist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: whitelist
+          path: release
+
+      - name: Commit to main
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
 
-          git fetch origin main
-
-          # Полная очистка
-          git reset --hard
-          git clean -fdx
-
-          # Переключаемся на main
-          git checkout -B main origin/main
-
-          # Создаём release/
-          mkdir -p release
-
-          # Копируем файл напрямую из develop-рабочей директории
-          cp ../release/whitelist.txt release/whitelist.txt
-
-          git add release/whitelist.txt || true
+          git add release/whitelist.txt
 
           if ! git diff --staged --quiet; then
             git commit -m "🤖 Auto-update: weekly whitelist merge"
