@@ -256,7 +256,14 @@ async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
             while True:
                 event = await client.wait_for_event()
                 if isinstance(event, HeadersReceived):
-                    res["code"] = 200
+                    status_header = next(
+                        (v for k, v in event.headers if k == b":status"),
+                        b""
+                    )
+                    try:
+                        res["code"] = int(status_header)
+                    except ValueError:
+                        res["code"] = 0
                 elif isinstance(event, DataReceived):
                     body += event.data
                     if len(body) >= 2048:
@@ -265,9 +272,9 @@ async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
                     break
 
             res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-            if res["code"] == 200:
+            if 200 <= res["code"] < 400:
                 res["status"] = "OK"
-                res["details"] = "HTTP/3 OK"
+                res["details"] = f"HTTP/3 {res['code']}"
             else:
                 res["status"] = "HTTP_ERR"
                 res["details"] = f"H3 status {res['code'] or 0}"
