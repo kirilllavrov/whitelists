@@ -2,7 +2,7 @@
 """
 Browser Mode: имитация работы браузера
  - DNS
- - HTTP/3 (QUIC) → HTTP/2 → HTTP/1.1
+ - HTTP/3 (QUIC) → HTTP/1.1 (aiohttp) → HTTP/1.1 (httpx)
  - без HTTP (порт 80)
  - Chrome-подобные заголовки
  - cookie-jar
@@ -32,6 +32,12 @@ try:
     HAVE_QUIC = True
 except ImportError:
     HAVE_QUIC = False
+
+try:
+    import aiodns
+    HAVE_AIODNS = True
+except ImportError:
+    HAVE_AIODNS = False
 
 logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
@@ -69,6 +75,7 @@ CONFIG = {
     "timeout_dns": 20,
     "concurrency": 10,
     "retries": 2,
+    "nameservers": None,
     "headers": {
         "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -115,6 +122,29 @@ OPERATORS = {
 }
 
 async def dns_resolve(domain: str) -> Tuple[bool, List[str]]:
+    nameservers = CONFIG.get("nameservers")
+    if nameservers and HAVE_AIODNS:
+        resolver = aiodns.DNSResolver(
+            nameservers=nameservers,
+            timeout=CONFIG["timeout_dns"],
+        )
+        try:
+            async def query_safe(record_type: str):
+                try:
+                    return await resolver.query(domain, record_type)
+                except aiodns.error.DNSError:
+                    return []
+
+            a_records, aaaa_records = await asyncio.gather(
+                query_safe("A"), query_safe("AAAA")
+            )
+            ips = {r.host for r in a_records} | {r.host for r in aaaa_records}
+            return (bool(ips), sorted(ips))
+        except Exception:
+            return False, []
+        finally:
+            resolver.close()
+
     loop = asyncio.get_running_loop()
     try:
         infos = await asyncio.wait_for(
@@ -256,7 +286,14 @@ async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
             while True:
                 event = await client.wait_for_event()
                 if isinstance(event, HeadersReceived):
-                    res["code"] = 200
+                    status_header = next(
+                        (v for k, v in event.headers if k == b":status"),
+                        b""
+                    )
+                    try:
+                        res["code"] = int(status_header)
+                    except ValueError:
+                        res["code"] = 0
                 elif isinstance(event, DataReceived):
                     body += event.data
                     if len(body) >= 2048:
@@ -265,9 +302,9 @@ async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
                     break
 
             res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-            if res["code"] == 200:
+            if 200 <= res["code"] < 400:
                 res["status"] = "OK"
-                res["details"] = "HTTP/3 OK"
+                res["details"] = f"HTTP/3 {res['code']}"
             else:
                 res["status"] = "HTTP_ERR"
                 res["details"] = f"H3 status {res['code'] or 0}"
@@ -280,13 +317,13 @@ async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
 
     return res
 
-async def check_with_aiohttp_h2(session: aiohttp.ClientSession, domain: str,
-                                timeout: aiohttp.ClientTimeout) -> dict:
+async def check_with_aiohttp_h11(session: aiohttp.ClientSession, domain: str,
+                                 timeout: aiohttp.ClientTimeout) -> dict:
     res = {
         "domain": domain,
         "status": "",
         "code": 0,
-        "method": "H2",
+        "method": "H1.1",
         "rtt_ms": 0,
         "details": "",
         "client": "aiohttp",
@@ -373,9 +410,9 @@ async def browser_check_domain(domain: str,
                 if quic_res["status"] == "OK":
                     return quic_res
 
-        # 2) HTTPS HTTP/2 (aiohttp)
+        # 2) HTTPS HTTP/1.1 (aiohttp)
         for attempt in range(CONFIG["retries"] + 1):
-            h2_res = await check_with_aiohttp_h2(aiohttp_session, domain, aiohttp_timeout)
+            h2_res = await check_with_aiohttp_h11(aiohttp_session, domain, aiohttp_timeout)
             if h2_res["status"] == "OK":
                 return h2_res
             if h2_res["status"] in ("TIMEOUT", "RST", "SSL_ERR", "HTTP_ERR"):
@@ -440,7 +477,7 @@ async def run_checker(domains: List[str],
     http_domains = [d for d, (ok, _) in dns_results.items() if ok]
 
     if http_domains:
-        print(f"\n{C['bold']}🔍 Этап 2/2: Browser Mode HTTP/3 → H2 → H1.1 ({len(http_domains)} доменов)...{C['reset']}")
+        print(f"\n{C['bold']}🔍 Этап 2/2: Browser Mode HTTP/3 → H1.1 aiohttp → H1.1 httpx ({len(http_domains)} доменов)...{C['reset']}")
         print(f"   🌐 Режим: имитация браузера (без HTTP fallback)")
 
         aiohttp_timeout = aiohttp.ClientTimeout(
@@ -521,6 +558,7 @@ async def main():
     args = parser.parse_args()
 
     CONFIG["concurrency"] = args.concurrency
+    CONFIG["nameservers"] = args.dns if args.dns else None
 
     use_custom_dns = bool(args.dns)
     directory = args.directory
