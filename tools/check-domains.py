@@ -2,7 +2,7 @@
 """
 Browser Mode: имитация работы браузера
  - DNS
- - HTTP/3 (QUIC) → HTTP/2 → HTTP/1.1
+ - HTTP/3 (QUIC) → HTTP/1.1 (aiohttp) → HTTP/1.1 (httpx)
  - без HTTP (порт 80)
  - Chrome-подобные заголовки
  - cookie-jar
@@ -317,13 +317,13 @@ async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
 
     return res
 
-async def check_with_aiohttp_h2(session: aiohttp.ClientSession, domain: str,
-                                timeout: aiohttp.ClientTimeout) -> dict:
+async def check_with_aiohttp_h11(session: aiohttp.ClientSession, domain: str,
+                                 timeout: aiohttp.ClientTimeout) -> dict:
     res = {
         "domain": domain,
         "status": "",
         "code": 0,
-        "method": "H2",
+        "method": "H1.1",
         "rtt_ms": 0,
         "details": "",
         "client": "aiohttp",
@@ -410,9 +410,9 @@ async def browser_check_domain(domain: str,
                 if quic_res["status"] == "OK":
                     return quic_res
 
-        # 2) HTTPS HTTP/2 (aiohttp)
+        # 2) HTTPS HTTP/1.1 (aiohttp)
         for attempt in range(CONFIG["retries"] + 1):
-            h2_res = await check_with_aiohttp_h2(aiohttp_session, domain, aiohttp_timeout)
+            h2_res = await check_with_aiohttp_h11(aiohttp_session, domain, aiohttp_timeout)
             if h2_res["status"] == "OK":
                 return h2_res
             if h2_res["status"] in ("TIMEOUT", "RST", "SSL_ERR", "HTTP_ERR"):
@@ -477,7 +477,7 @@ async def run_checker(domains: List[str],
     http_domains = [d for d, (ok, _) in dns_results.items() if ok]
 
     if http_domains:
-        print(f"\n{C['bold']}🔍 Этап 2/2: Browser Mode HTTP/3 → H2 → H1.1 ({len(http_domains)} доменов)...{C['reset']}")
+        print(f"\n{C['bold']}🔍 Этап 2/2: Browser Mode HTTP/3 → H1.1 aiohttp → H1.1 httpx ({len(http_domains)} доменов)...{C['reset']}")
         print(f"   🌐 Режим: имитация браузера (без HTTP fallback)")
 
         aiohttp_timeout = aiohttp.ClientTimeout(
