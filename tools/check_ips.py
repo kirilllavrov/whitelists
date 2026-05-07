@@ -15,7 +15,7 @@ import signal
 import itertools
 import threading
 import atexit
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import time
 
 # ================= КОНФИГУРАЦИЯ =================
@@ -314,7 +314,7 @@ def process_stream(ip_generator, original_filename, results_dir, checkpoint_stat
                         
                         if len(futures) < MAX_QUEUE_SIZE // 2:
                             break
-                except TimeoutError:
+                except FuturesTimeoutError:
                     pass
                 
                 # Статистика
