@@ -33,6 +33,12 @@ try:
 except ImportError:
     HAVE_QUIC = False
 
+try:
+    import aiodns
+    HAVE_AIODNS = True
+except ImportError:
+    HAVE_AIODNS = False
+
 logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("aiodns").setLevel(logging.CRITICAL)
@@ -69,6 +75,7 @@ CONFIG = {
     "timeout_dns": 20,
     "concurrency": 10,
     "retries": 2,
+    "nameservers": None,
     "headers": {
         "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -115,6 +122,29 @@ OPERATORS = {
 }
 
 async def dns_resolve(domain: str) -> Tuple[bool, List[str]]:
+    nameservers = CONFIG.get("nameservers")
+    if nameservers and HAVE_AIODNS:
+        resolver = aiodns.DNSResolver(
+            nameservers=nameservers,
+            timeout=CONFIG["timeout_dns"],
+        )
+        try:
+            async def query_safe(record_type: str):
+                try:
+                    return await resolver.query(domain, record_type)
+                except aiodns.error.DNSError:
+                    return []
+
+            a_records, aaaa_records = await asyncio.gather(
+                query_safe("A"), query_safe("AAAA")
+            )
+            ips = {r.host for r in a_records} | {r.host for r in aaaa_records}
+            return (bool(ips), sorted(ips))
+        except Exception:
+            return False, []
+        finally:
+            resolver.close()
+
     loop = asyncio.get_running_loop()
     try:
         infos = await asyncio.wait_for(
@@ -528,6 +558,7 @@ async def main():
     args = parser.parse_args()
 
     CONFIG["concurrency"] = args.concurrency
+    CONFIG["nameservers"] = args.dns if args.dns else None
 
     use_custom_dns = bool(args.dns)
     directory = args.directory
