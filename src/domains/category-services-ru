@@ -11,6 +11,13 @@ bitrix24.ru
 2gis.com
 2gis.ru
 2gis.ae
+2gis.am
+2gis.az
+2gis.by
+2gis.ge
+2gis.kg
+2gis.tj
+2gis.uz
 
 # Глонасс
 aoglonass.ru
@@ -21,9 +28,6 @@ atomen.ru
 # Aeroflot
 aeroflot.ru
 
-# CDEK
-cdek.ru
-
 # Каршеринг Belkacar
 belkacar.ru
 
@@ -32,6 +36,9 @@ delimobil.ru
 
 # Chestniy Znak
 markirovka.ru
+
+# Meteum ИИ
+meteum.ai
 
 # City Drive
 citydrive.ru
@@ -51,6 +58,9 @@ evotor.ru
 
 # Grand service express
 grandtrain.ru
+
+# GigaChat ИИ
+giga.chat
 
 # Gismeteo
 gismeteo.ru
@@ -80,6 +90,12 @@ lizaalert.org
 imgsmail.ru
 mail.ru
 
+# Memealerts
+memealerts.com
+
+# Нет монет
+netmonet.co
+
 # Rambler
 rambler.ru
 
@@ -100,8 +116,17 @@ rzd.ru
 rzd-bonus.ru
 dzvr.ru
 
+# Сбер Маркетинг
+sbermarketing.ru
+
+# Шедеврум ИИ
+shedevrum.ai
+
 # Sleza Media
 sleza.media
+
+# SourceCraft
+sourcecraft.dev
 
 # Target Ads
 targetads.io
