@@ -69,13 +69,13 @@ whitelists/
 
 ### 1. Скачивание репозитория
 
-Клонируйте репозиторий
+Клонируйте репозиторий:
 ```bash
 git clone https://github.com/kirilllavrov/whitelists.git
 cd whitelists
 ```
 
-Или скачайте ZIP-архив и распакуйте
+Или скачайте ZIP-архив и распакуйте:
 ```bash
 wget https://github.com/kirilllavrov/whitelists/archive/refs/heads/main.zip
 unzip main.zip
@@ -84,39 +84,55 @@ cd whitelists
 
 ### 2. Установка зависимостей
 
-Создайте виртуальное окружение (рекомендуется)
+Создайте виртуальное окружение (рекомендуется):
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-Установите зависимости для check-domains.py
+Установите зависимости для check-domains.py:
+
 ```bash
 pip install aiohttp httpx aiodns aioquic
 ```
+
 Для check_ips.py дополнительные зависимости не требуются
 
 ### 3. Проверка доменов
 
+Переходим в рабочую директорию:
+
 ```bash
 cd tools
+```
 
-# Базовая проверка (использует домены из ../src/domains/)
+Базовая проверка (использует домены из ../src/domains/):
+
+```bash
 python3 check-domains.py
+```
 
-# Проверка с настройками
+Проверка с настройками:
+
+```bash
 python3 check-domains.py ../src/domains \
     -c 10 \                                 # 10 параллельных запросов (по умолчанию 5)
     -e category-gov-ru \                    # Исключить категорию
     --dns 77.88.8.8 77.88.8.1 \             # Использовать кастомные DNS
     --verify-ssl                            # Включить проверку SSL
+```
 
-# Тихий режим (без подробного вывода)
+Тихий режим (без подробного вывода):
+
+```bash
 python3 check-domains.py -q
 ```
 
 **После проверки:**
+
 - Скрипт предложит выбрать мобильного оператора (1-6)
+
 - Результат сохранится в `../build/domains_checked/whitelist-<TIMESTAMP>-<OPERATOR>.txt`
 
 ### 4. Проверка IP-адресов
