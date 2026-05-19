@@ -1,656 +1,343 @@
 #!/usr/bin/env python3
 """
-Browser Mode: имитация работы браузера
- - DNS
- - HTTP/3 (QUIC) → HTTP/1.1 (aiohttp) → HTTP/1.1 (httpx)
- - без HTTP (порт 80)
- - Chrome-подобные заголовки
- - cookie-jar
- - retry-логика
- - цветной вывод
+Проверка доменов на доступность при обходе блокировок.
+Универсальный pipeline: 
+  1. curl_cffi (impersonate="chrome", HTTPS)
+  2. httpx (HTTPS, HTTP/2)
+  3. httpx (HTTPS, HTTP/1.1)
+  4. httpx (HTTP:80, HTTP/1.0) [опционально]
+Зависимости: pip install curl_cffi httpx aiodns
 """
-
 import asyncio
-import aiohttp
-import httpx
 import sys
 import os
 import time
 import socket
+import random
 import argparse
 import logging
-import ssl
+import re
 from datetime import datetime
-from typing import List, Tuple, Dict, Set
+from typing import List, Tuple, Dict, Set, Callable
 from pathlib import Path
+from collections import OrderedDict
 
+# 🔧 Подключение curl_cffi
 try:
-    from aioquic.asyncio.client import connect as quic_connect
-    from aioquic.h3.connection import H3_ALPN, H3Connection
-    from aioquic.h3.events import HeadersReceived, DataReceived
-    from aioquic.quic.configuration import QuicConfiguration
-    HAVE_QUIC = True
+    from curl_cffi.requests import AsyncSession as CurlCffiSession
+    USE_CURL_CFFI = True
 except ImportError:
-    HAVE_QUIC = False
+    USE_CURL_CFFI = False
+    logging.warning("⚠️ curl_cffi не установлен. Pipeline будет использовать только httpx.")
 
-try:
-    import aiodns
-    HAVE_AIODNS = True
-except ImportError:
-    HAVE_AIODNS = False
+import httpx
+import aiodns
 
-logging.getLogger("aiohttp").setLevel(logging.CRITICAL)
-logging.getLogger("asyncio").setLevel(logging.CRITICAL)
-logging.getLogger("aiodns").setLevel(logging.CRITICAL)
-logging.getLogger("httpx").setLevel(logging.CRITICAL)
-logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+# ✅ Тишина в логах библиотек
+for name in ('httpx', 'httpcore', 'aiodns', 'asyncio', 'curl_cffi'):
+    logging.getLogger(name).setLevel(logging.CRITICAL)
 
-C = {
-    "reset": "\033[0m",
-    "red": "\033[31m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-    "blue": "\033[34m",
-    "magenta": "\033[35m",
-    "cyan": "\033[36m",
-    "gray": "\033[90m",
-    "bold": "\033[1m",
-}
-
-STATUS_COLOR = {
-    "OK": C["green"],
-    "HTTP_ERR": C["yellow"],
-    "SSL_ERR": C["red"],
-    "RST": C["red"],
-    "DNS_ERR": C["blue"],
-    "TIMEOUT": C["magenta"],
-    "UNKNOWN": C["gray"],
-    "UNREACH": C["gray"],
-    "QUIC_ERR": C["magenta"],
-}
-
+# === КОНФИГУРАЦИЯ ===
 CONFIG = {
-    "timeout_connect": 40,
-    "timeout_total": 60,
-    "timeout_dns": 20,
-    "concurrency": 10,
-    "retries": 2,
-    "nameservers": None,
-    "headers": {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "Sec-Ch-Ua-Mobile": "?1",
-        "Sec-Ch-Ua-Platform": '"Android"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Connection": "keep-alive",
-    },
+    "timeout_connect": 10,
+    "timeout_total": 15,
+    "timeout_dns": 10,
+    "concurrency": 5,
 }
-
-SSL_CTX = ssl.create_default_context()
-SSL_CTX.check_hostname = True
-SSL_CTX.verify_mode = ssl.CERT_REQUIRED
 
 ICONS = {
-    "OK": "✅",
-    "TIMEOUT": "🕐",
-    "SSL_ERR": "🔐",
-    "HTTP_ERR": "⚠️",
-    "DNS_ERR": "🌐",
-    "UNKNOWN": "❓",
-    "UNREACH": "🚫",
-    "QUIC_ERR": "📡",
+    "OK": "✅", "RST": "❌", "TIMEOUT": "🕐",
+    "SSL_ERR": "🔐", "HTTP_ERR": "⚠️", "DNS_ERR": "🌐",
+    "UNKNOWN": "❓", "DPI_BLOCK": "🔒", "UNREACH": "🚫", "BOT_BLOCK": "🤖",
+    "TLS_ERR": "🔐", "HTTP2_ERR": "⚠️", "PORT_BLOCK": "🚧", "HTTP_OK": "🌐"
 }
 
+FALLBACK_STATUSES = {"UNKNOWN", "TIMEOUT", "RST", "SSL_ERR", "TLS_ERR", "PORT_BLOCK"}
+FALLBACK_KEYWORDS = ["protocol_error", "stream was not closed", "server disconnected"]
 DEFAULT_EXCLUDES = {"category-ru"}
-
 OPERATORS = {
-    "1": "Megafon",
-    "2": "Beeline",
-    "3": "MTS",
-    "4": "Tele2",
-    "5": "Yota",
-    "6": "RT",
+    "1": "Megafon", "2": "Beeline", "3": "MTS", "4": "Tele2", "5": "Yota", "6": "RT"
 }
 
-async def dns_resolve(domain: str) -> Tuple[bool, List[str]]:
-    nameservers = CONFIG.get("nameservers")
-    if nameservers and HAVE_AIODNS:
-        resolver = aiodns.DNSResolver(
-            nameservers=nameservers,
-            timeout=CONFIG["timeout_dns"],
-        )
-        try:
-            async def query_safe(record_type: str):
-                try:
-                    return await resolver.query(domain, record_type)
-                except aiodns.error.DNSError:
-                    return []
+def get_dynamic_chrome_headers() -> OrderedDict:
+    """Генерирует заголовки Chrome без захардкоженных версий."""
+    # Базовая версия Chrome (обновляется при релизах)
+    chrome_major = "124"
+    chrome_full = f"{chrome_major}.0.6367.60"
+    
+    return OrderedDict([
+        ("User-Agent", f"Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_full} Mobile Safari/537.36"),
+        ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+        ("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"),
+        ("Accept-Encoding", "gzip, deflate, br"),
+        ("Sec-Ch-Ua", f'"Not-A.Brand";v="8", "Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}"'),
+        ("Sec-Ch-Ua-Mobile", "?1"),
+        ("Sec-Ch-Ua-Platform", '"Android"'),
+        ("Sec-Ch-Ua-Platform-Version", '"15"'),
+        ("Sec-Ch-Ua-Arch", '"arm"'),
+        ("Sec-Ch-Ua-Model", '"Pixel 7"'),
+        ("Sec-Ch-Ua-Bitness", '"64"'),
+        ("Sec-Ch-Ua-Full-Version", f'"{chrome_full}"'),
+        ("Sec-Ch-Ua-Full-Version-List", f'"Not-A.Brand";v="8.0.0.0", "Chromium";v="{chrome_full}", "Google Chrome";v="{chrome_full}"'),
+        ("Sec-Fetch-Dest", "document"),
+        ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Site", "none"),
+        ("Sec-Fetch-User", "?1"),
+        ("Upgrade-Insecure-Requests", "1"),
+        ("Cache-Control", "no-cache"),
+        ("Pragma", "no-cache"),
+        ("Priority", "u=0, i"),
+        ("Connection", "keep-alive"),
+    ])
 
-            a_records, aaaa_records = await asyncio.gather(
-                query_safe("A"), query_safe("AAAA")
-            )
-            ips = {r.host for r in a_records} | {r.host for r in aaaa_records}
-            return (bool(ips), sorted(ips))
-        except Exception:
-            return False, []
-        finally:
-            resolver.close()
-
-    loop = asyncio.get_running_loop()
-    try:
-        infos = await asyncio.wait_for(
-            loop.getaddrinfo(domain, 443, type=socket.SOCK_STREAM),
-            timeout=CONFIG["timeout_dns"]
-        )
-        ips = sorted({info[4][0] for info in infos})
-        return True, ips
-    except Exception:
-        return False, []
-
+DYNAMIC_HEADERS = get_dynamic_chrome_headers()
 
 def classify_error(error: Exception) -> Tuple[str, str]:
     err_str = str(error).lower()
     err_repr = repr(error).lower()
+    curl_code = None
+    curl_match = re.search(r'curl:\s*\((\d+)\)', err_str)
+    if curl_match: curl_code = int(curl_match.group(1))
 
-    if isinstance(error, socket.gaierror):
-        return "DNS_ERR", "Domain not resolved"
-    if "no address" in err_str or "name or service not known" in err_str:
-        return "DNS_ERR", "Domain not resolved"
-    if isinstance(error, OSError) and "timeout" in err_str:
-        return "DNS_ERR", "DNS timeout"
+    if curl_code is not None:
+        if curl_code == 6: return "DNS_ERR", "Could not resolve host"
+        if curl_code == 35:
+            if "invalid library" in err_str or "OPENSSL_internal" in err_repr: return "TLS_ERR", "OpenSSL/TLS stack mismatch"
+            if "TLSV1_ALERT_INTERNAL_ERROR" in err_str or "internal error" in err_str: return "DPI_BLOCK", "Server rejected TLS handshake"
+            return "SSL_ERR", "SSL/TLS handshake error"
+        if curl_code == 47: return "HTTP_ERR", "Too many redirects"
+        if curl_code == 56: return "TIMEOUT" if "closed abruptly" not in err_str else "RST", "Network receive error"
+        if curl_code == 92: return "HTTP2_ERR", "HTTP/2 stream error"
+        if curl_code == 28: return "PORT_BLOCK" if "connect" in err_str else "TIMEOUT", "Operation timed out"
+        if curl_code == 7: return "PORT_BLOCK" if "refused" in err_str else "TIMEOUT", "Could not connect"
+        if curl_code == 52: return "RST", "Server returned nothing"
+        return "UNKNOWN", f"curl error {curl_code}"
 
-    if isinstance(error, aiohttp.ClientResponseError):
-        return "HTTP_ERR", f"Response error {error.status}"
-
-    if ("connection reset" in err_str or "recv failure" in err_str or "errno 104" in err_str):
-        return "RST", "Connection reset by peer"
-
-    if isinstance(error, asyncio.TimeoutError) or "timeout" in err_str or "errno 110" in err_str:
-        return "TIMEOUT", "Connection timed out"
-
-    if "refused" in err_str or "errno 111" in err_str:
-        return "UNREACH", "Connection refused"
-
-    if "ssl" in err_str or "certificate" in err_str or "handshake" in err_str:
-        return "SSL_ERR", "SSL handshake failed"
-
-    if "unreachable" in err_str or "no route" in err_str:
-        return "UNREACH", "Host unreachable"
-
-    if "http2" in err_str and "protocol" in err_str:
-        return "HTTP_ERR", "HTTP/2 protocol error"
-
-    if "unexpected eof" in err_str:
-        return "RST", "Unexpected EOF (server closed connection)"
-
+    if isinstance(error, socket.gaierror): return "DNS_ERR", "Domain not resolved"
+    if isinstance(error, OSError):
+        if "timeout" in err_str or "timed out" in err_str: return "TIMEOUT", "Connection timed out"
+        if "refused" in err_str: return "PORT_BLOCK", "Connection refused"
+        if "reset" in err_str:
+            if "[none]" in err_repr and ("handshake" in err_repr or "tls" in err_repr): return "DPI_BLOCK", "Connection reset during TLS handshake"
+            return "RST", "Connection reset by peer"
+        return "UNKNOWN", f"OSError: {error}"
+    if "timeout" in err_str or "timed out" in err_str: return "TIMEOUT", "Request timed out"
+    if "ssl" in err_str or "certificate" in err_str: return "SSL_ERR", "SSL/TLS error"
+    if "redirect" in err_str or "max redirect" in err_str: return "HTTP_ERR", "Too many redirects"
+    if hasattr(error, 'response'):
+        code = getattr(error.response, 'status_code', 0)
+        if code in (403, 429, 503): return "BOT_BLOCK", f"Bot detection: HTTP {code}"
+        return "HTTP_ERR", f"HTTP {code}"
     return "UNKNOWN", f"{type(error).__name__}: {str(error)}"
-
 
 def extract_domain(line: str) -> str:
     line = line.strip()
-    if not line or line.startswith('#'):
-        return ""
+    if not line or line.startswith('#'): return ""
     domain = line.replace('https://', '').replace('http://', '')
     return domain.split('/')[0].split('?')[0].split('#')[0].strip()
 
-
 def get_files_to_process(directory: str, excludes: Set[str]) -> List[Path]:
     dir_path = Path(directory)
-    if not dir_path.is_dir():
-        print(f"❌ Директория '{directory}' не найдена")
-        sys.exit(1)
+    if not dir_path.is_dir(): print(f"❌ Директория '{directory}' не найдена"); sys.exit(1)
     return sorted([f for f in dir_path.iterdir() if f.is_file() and f.stem not in excludes])
 
-
 def load_domains_from_files(files: List[Path]) -> List[str]:
-    domains = []
-    seen = set()
+    domains, seen = [], set()
     for filepath in files:
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
                 domain = extract_domain(line)
-                if domain and domain not in seen:
-                    seen.add(domain)
-                    domains.append(domain)
+                if domain and domain not in seen: seen.add(domain); domains.append(domain)
     return domains
 
-
-def print_result_line(res: dict, index: int, total: int):
-    icon = ICONS.get(res["status"], "❓")
-    color = STATUS_COLOR.get(res["status"], C["reset"])
-    print(
-        f"{color}[{index}/{total}] "
-        f"{icon} {res['domain']:<45} "
-        f"{res['status']:<10} {res['method']:<6} {res['details']}{C['reset']}"
-    )
-
-async def check_with_quic(domain: str, ip: str | None, timeout: float) -> dict:
-    res = {
-        "domain": domain,
-        "status": "",
-        "code": 0,
-        "method": "H3",
-        "rtt_ms": 0,
-        "details": "",
-        "client": "quic",
-    }
-
-    if not HAVE_QUIC:
-        res["status"] = "QUIC_ERR"
-        res["details"] = "aioquic not installed"
-        return res
-
-    configuration = QuicConfiguration(
-        is_client=True,
-        alpn_protocols=H3_ALPN,
-    )
-
-    host = ip or domain
-    start = time.time()
-
-    try:
-        async with quic_connect(
-            host,
-            443,
-            configuration=configuration,
-            server_name=domain,
-            wait_connected=True,
-        ) as client:
-            h3 = H3Connection(client._quic)
-            stream_id = client._quic.get_next_available_stream_id()
-            headers = [
-                (b":method", b"GET"),
-                (b":scheme", b"https"),
-                (b":authority", domain.encode()),
-                (b":path", b"/"),
-            ]
-            for k, v in CONFIG["headers"].items():
-                headers.append((k.encode().lower(), v.encode()))
-
-            h3.send_headers(stream_id, headers, end_stream=True)
-            client.transmit()
-
-            body = b""
-            while True:
-                event = await client.wait_for_event()
-                if isinstance(event, HeadersReceived):
-                    status_header = next(
-                        (v for k, v in event.headers if k == b":status"),
-                        b""
-                    )
-                    try:
-                        res["code"] = int(status_header)
-                    except ValueError:
-                        res["code"] = 0
-                elif isinstance(event, DataReceived):
-                    body += event.data
-                    if len(body) >= 2048:
-                        break
-                if client._quic._close_pending or client._quic._closed:
-                    break
-
-            res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-            if 200 <= res["code"] < 400:
-                res["status"] = "OK"
-                res["details"] = f"HTTP/3 {res['code']}"
-            else:
-                res["status"] = "HTTP_ERR"
-                res["details"] = f"H3 status {res['code'] or 0}"
-
-    except Exception as e:
-        res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-        status, details = classify_error(e)
-        res["status"] = "QUIC_ERR" if status == "UNKNOWN" else status
-        res["details"] = f"QUIC: {details}"
-
-    return res
-
-async def check_with_aiohttp_h11(session: aiohttp.ClientSession, domain: str,
-                                 timeout: aiohttp.ClientTimeout) -> dict:
-    res = {
-        "domain": domain,
-        "status": "",
-        "code": 0,
-        "method": "H1.1",
-        "rtt_ms": 0,
-        "details": "",
-        "client": "aiohttp",
-    }
-
-    url = f"https://{domain}"
-    start = time.time()
-
-    try:
-        async with session.get(
-            url,
-            allow_redirects=True,
-            ssl=SSL_CTX,
-            timeout=timeout,
-            headers=CONFIG["headers"]
-        ) as resp:
-            await resp.content.read(2048)
-            res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-            res["code"] = resp.status
-            if 200 <= resp.status < 400:
-                res["status"] = "OK"
-                res["details"] = resp.reason or "OK"
-            else:
-                res["status"] = "HTTP_ERR"
-                res["details"] = f"{resp.status} {resp.reason}"
-    except Exception as e:
-        res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-        res["status"], res["details"] = classify_error(e)
-
-    return res
-
-
-async def check_with_httpx_h11(domain: str, timeout: float, cookies: dict | None) -> dict:
-    res = {
-        "domain": domain,
-        "status": "",
-        "code": 0,
-        "method": "H1.1",
-        "rtt_ms": 0,
-        "details": "",
-        "client": "httpx",
-    }
-
-    url = f"https://{domain}"
-    start = time.time()
-
-    try:
-        async with httpx.AsyncClient(
-            http2=False,
-            verify=True,
-            timeout=httpx.Timeout(timeout),
-            follow_redirects=True,
-            headers=CONFIG["headers"],
-            cookies=cookies or {},
-        ) as client:
-            resp = await client.get(url)
-            _ = resp.content[:2048]
-            res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-            res["code"] = resp.status_code
-            if 200 <= resp.status_code < 400:
-                res["status"] = "OK"
-                res["details"] = resp.reason_phrase or "OK"
-            else:
-                res["status"] = "HTTP_ERR"
-                res["details"] = f"{resp.status_code} {resp.reason_phrase}"
-    except Exception as e:
-        res["rtt_ms"] = round((time.time() - start) * 1000, 1)
-        res["status"], res["details"] = classify_error(e)
-
-    return res
-
-
-async def browser_check_domain(domain: str,
-                               ips: List[str],
-                               aiohttp_session: aiohttp.ClientSession,
-                               aiohttp_timeout: aiohttp.ClientTimeout,
-                               sem: asyncio.Semaphore) -> dict:
-    async with sem:
-        # 1) QUIC (HTTP/3)
-        if HAVE_QUIC:
-            for attempt in range(CONFIG["retries"] + 1):
-                ip = ips[attempt % len(ips)] if ips else None
-                quic_res = await check_with_quic(domain, ip, CONFIG["timeout_total"])
-                if quic_res["status"] == "OK":
-                    return quic_res
-
-        # 2) HTTPS HTTP/1.1 (aiohttp)
-        for attempt in range(CONFIG["retries"] + 1):
-            h2_res = await check_with_aiohttp_h11(aiohttp_session, domain, aiohttp_timeout)
-            if h2_res["status"] == "OK":
-                return h2_res
-            if h2_res["status"] in ("TIMEOUT", "RST", "SSL_ERR", "HTTP_ERR"):
-                continue
-            break
-
-        # 3) HTTPS HTTP/1.1 (httpx)
-        jar_cookies = {}
-        for cookie in aiohttp_session.cookie_jar:
-            jar_cookies[cookie.key] = cookie.value
-
-        for attempt in range(CONFIG["retries"] + 1):
-            h11_res = await check_with_httpx_h11(domain, CONFIG["timeout_total"], jar_cookies)
-            if h11_res["status"] == "OK":
-                return h11_res
-            if h11_res["status"] in ("TIMEOUT", "RST", "SSL_ERR", "HTTP_ERR"):
-                continue
-            break
-
-        return h11_res if 'h11_res' in locals() else h2_res
-
-async def run_checker(domains: List[str],
-                      connector: aiohttp.TCPConnector,
-                      verbose: bool = True) -> Dict[str, dict]:
-    results: Dict[str, dict] = {}
-
-    print(f"{C['bold']}🔍 Этап 1/2: DNS‑резолв ({len(domains)} доменов)...{C['reset']}")
-
-    dns_sem = asyncio.Semaphore(CONFIG["concurrency"] * 2)
-
-    async def resolve_task(domain: str):
-        async with dns_sem:
-            ok, ips = await dns_resolve(domain)
-            return domain, ok, ips
-
-    dns_results: Dict[str, Tuple[bool, List[str]]] = {}
-    completed = 0
-
-    for coro in asyncio.as_completed([resolve_task(d) for d in domains]):
-        domain, resolved, ips = await coro
-        dns_results[domain] = (resolved, ips)
-        completed += 1
-        if verbose and completed % 50 == 0:
-            print(f"  → DNS: {completed}/{len(domains)}")
-
-    dns_ok = sum(1 for v in dns_results.values() if v[0])
-    print(f"  {C['green']}✅ Резолвятся: {dns_ok}{C['reset']} | "
-          f"{C['red']}❌ Не резолвятся: {len(domains) - dns_ok}{C['reset']}")
-
-    for domain, (resolved, _) in dns_results.items():
-        if not resolved:
-            results[domain] = {
-                "domain": domain,
-                "status": "DNS_ERR",
-                "code": 0,
-                "method": "-",
-                "rtt_ms": 0,
-                "details": "Domain not resolved",
-                "client": "-",
-            }
-
-    http_domains = [d for d, (ok, _) in dns_results.items() if ok]
-
-    if http_domains:
-        print(f"\n{C['bold']}🔍 Этап 2/2: Browser Mode HTTP/3 → H1.1 aiohttp → H1.1 httpx ({len(http_domains)} доменов)...{C['reset']}")
-        print(f"   🌐 Режим: имитация браузера (без HTTP fallback)")
-
-        aiohttp_timeout = aiohttp.ClientTimeout(
-            connect=CONFIG["timeout_connect"],
-            total=CONFIG["timeout_total"]
-        )
-
-        async with aiohttp.ClientSession(
-            connector=connector,
-            cookie_jar=aiohttp.CookieJar()
-        ) as aiohttp_session:
-
-            http_sem = asyncio.Semaphore(CONFIG["concurrency"])
-
-            tasks = [
-                browser_check_domain(
-                    d,
-                    dns_results[d][1],
-                    aiohttp_session,
-                    aiohttp_timeout,
-                    http_sem
-                )
-                for d in http_domains
-            ]
-
-            completed = 0
-            start_time = time.time()
-
-            for coro in asyncio.as_completed(tasks):
-                res = await coro
-                results[res["domain"]] = res
-                completed += 1
-
-                if verbose:
-                    print_result_line(res, completed, len(http_domains))
-
-                if completed % 100 == 0:
-                    elapsed = time.time() - start_time
-                    speed = completed / elapsed if elapsed > 0 else 0
-                    print(f"  → HTTP: {completed}/{len(http_domains)} ({speed:.1f} доменов/сек)")
-
-    return results
-
-def save_whitelist(successful_domains: List[str], operator_name: str,
-                   output_dir: str = "../build/domains_checked"):
-    timestamp = datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
-    filename = f"whitelist-{timestamp}-{operator_name}.txt"
-    output_file = os.path.join(output_dir, filename)
-
-    print(f"{C['cyan']}💾 Сохранение успешных доменов в {output_file}...{C['reset']}")
-    os.makedirs(output_dir, exist_ok=True)
-
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(successful_domains) + '\n')
-
-    print(f"{C['green']}  ✅ Whitelist сохранён{C['reset']}")
-
-
-def select_operator() -> str:
-    print(f"\n{C['bold']}📱 Выберите мобильного оператора:{C['reset']}")
-    for key, value in OPERATORS.items():
-        print(f"  {key}. {value}")
-
-    while True:
-        choice = input("Введите номер оператора (1-6): ").strip()
-        if choice in OPERATORS:
-            return OPERATORS[choice]
-        print(f"{C['red']}❌ Неверный выбор. Пожалуйста, введите число от 1 до 6.{C['reset']}")
-
-
-async def main():
-    parser = argparse.ArgumentParser(description='Browser Mode: проверка доменов как браузер')
-    parser.add_argument('directory', nargs='?', default='../src/domains', help='Директория со списками')
-    parser.add_argument('-c', '--concurrency', type=int, default=CONFIG["concurrency"], help='Параллельных запросов')
-    parser.add_argument('-q', '--quiet', action='store_true', help='Тихий режим')
-    parser.add_argument('-e', '--exclude', nargs='+', default=[], help='Исключения')
-    parser.add_argument('--dns', nargs='+', default=None, help='Кастомные DNS-серверы')
-    args = parser.parse_args()
-
-    CONFIG["concurrency"] = args.concurrency
-    CONFIG["nameservers"] = args.dns if args.dns else None
-
-    use_custom_dns = bool(args.dns)
-    directory = args.directory
-    excludes = DEFAULT_EXCLUDES.union(set(args.exclude))
-
-    print(f"{C['bold']}⚙️  Конфигурация (Browser Mode):{C['reset']}")
-    print(f"   timeout_connect: {CONFIG['timeout_connect']}s")
-    print(f"   timeout_total:   {CONFIG['timeout_total']}s")
-    print(f"   timeout_dns:     {CONFIG['timeout_dns']}s")
-    print(f"   concurrency:     {CONFIG['concurrency']}")
-    print(f"   retries:         {CONFIG['retries']}")
-    print(f"   dns:             {'Кастомный (' + ', '.join(args.dns) + ')' if use_custom_dns else 'SYSTEM ✅'}")
-    print(f"   quic:            {'ON' if HAVE_QUIC else 'OFF (aioquic not installed)'}")
-    print("-" * 85)
-    print(f"📂 Директория: {directory}")
-    print(f"🚫 Исключения: {', '.join(excludes)}")
-    print("-" * 85)
-
-    files = get_files_to_process(directory, excludes)
-    if not files:
-        print(f"{C['red']}❌ Нет файлов для обработки{C['reset']}")
-        sys.exit(1)
-
-    print(f"📁 Файлов для проверки: {len(files)}")
-    for f in files:
-        print(f"   - {f.name}")
-    print("-" * 85)
-
-    domains = load_domains_from_files(files)
-    print(f"📋 Доменов: {len(domains)} | 🚀 Потоков: {CONFIG['concurrency']}")
-    print("-" * 85)
-
+async def check_dns_async(domain: str, use_custom_dns: bool, dns_servers: list, timeout: float) -> bool:
     try:
         if use_custom_dns:
-            resolver = aiohttp.AsyncResolver(nameservers=args.dns)
-            connector = aiohttp.TCPConnector(
-                limit=CONFIG["concurrency"],
-                ttl_dns_cache=300,
-                use_dns_cache=True,
-                resolver=resolver,
-                enable_cleanup_closed=True
-            )
-            print(f"{C['cyan']}🌐 DNS: Кастомный ({', '.join(args.dns)}){C['reset']}")
+            resolver = aiodns.DNSResolver(nameservers=dns_servers)
+            tasks = [asyncio.wait_for(resolver.query(domain, 'A'), timeout=timeout),
+                     asyncio.wait_for(resolver.query(domain, 'AAAA'), timeout=timeout)]
+            for coro in asyncio.as_completed(tasks):
+                try: await coro; return True
+                except: continue
+            return False
         else:
-            connector = aiohttp.TCPConnector(
-                limit=CONFIG["concurrency"],
-                ttl_dns_cache=300,
-                use_dns_cache=True,
-                enable_cleanup_closed=True
-            )
-            print(f"{C['cyan']}🌐 DNS: Системный резолвер (/etc/resolv.conf){C['reset']}")
-    except Exception as e:
-        print(f"{C['red']}❌ Ошибка создания connector: {e}{C['reset']}")
-        sys.exit(1)
+            loop = asyncio.get_running_loop()
+            await asyncio.wait_for(loop.getaddrinfo(domain, 443, type=socket.SOCK_STREAM), timeout=timeout)
+            return True
+    except: return False
 
+async def _do_request(url: str, client_type: str, http2: bool, verify_ssl: bool, headers: dict, timeout: float) -> dict:
+    """Универсальный запрос для всех шагов pipeline."""
+    domain = url.split("://")[1].split('/')[0]
+    is_http = url.startswith("http://")
+    res = {
+        "domain": domain, "status": "", "code": 0,
+        "method": "H1.0" if is_http else ("H2" if http2 else "H1.1"),
+        "rtt_ms": 0, "details": "", "client": client_type
+    }
+    start = time.time()
     try:
-        start = time.time()
-        results = await run_checker(domains, connector, verbose=not args.quiet)
-        elapsed = time.time() - start
-
-        print("-" * 85)
-        print(f"{C['green']}✅ Готово за {elapsed:.1f} сек. "
-              f"({len(domains) / max(elapsed, 0.1):.1f} доменов/сек){C['reset']}")
-
-        successful_domains = [d for d, r in results.items() if r['status'] == 'OK']
-        print(f"📋 Успешных доменов: {len(successful_domains)}")
-
-        if successful_domains:
-            operator = select_operator()
-            print(f"{C['green']}✅ Выбран оператор: {operator}{C['reset']}")
-            save_whitelist(successful_domains, operator)
+        if client_type == "cffi" and USE_CURL_CFFI:
+            # curl_cffi сам управляет заголовками при impersonate, не переопределяем их
+            async with CurlCffiSession(impersonate="chrome", verify=verify_ssl, 
+                                       timeout=httpx.Timeout(timeout), allow_redirects=True) as client:
+                resp = await client.get(url)
+                res["rtt_ms"] = round((time.time() - start) * 1000, 1)
+                res["code"] = resp.status_code
+                res["status"] = "OK" if 200 <= resp.status_code < 400 else "HTTP_ERR"
+                res["details"] = f"{resp.status_code} {getattr(resp, 'reason', 'OK')}"
         else:
-            print(f"{C['yellow']}⚠️ Нет успешных доменов для сохранения{C['reset']}")
+            async with httpx.AsyncClient(http2=http2, verify=verify_ssl, timeout=httpx.Timeout(timeout), 
+                                         follow_redirects=True, headers=headers) as client:
+                resp = await client.get(url)
+                res["rtt_ms"] = round((time.time() - start) * 1000, 1)
+                res["code"] = resp.status_code
+                res["status"] = "OK" if 200 <= resp.status_code < 400 else "HTTP_ERR"
+                res["details"] = f"{resp.status_code} {resp.reason_phrase}"
+    except Exception as e:
+        res["status"], res["details"] = classify_error(e)
+    return res
 
-        print(f"\n{C['bold']}📊 Общая статистика:{C['reset']}")
-        status_counts = {}
-        for r in results.values():
-            status_counts[r['status']] = status_counts.get(r['status'], 0) + 1
+async def check_domain_pipeline(domain: str, timeout: float, verify_ssl: bool, 
+                                use_impersonate: bool, try_http_fallback: bool) -> dict:
+    """4-этапный pipeline проверки домена."""
+    # Определяем этапы
+    steps = [
+        ("cffi/HTTPS", lambda: _do_request(f"https://{domain}", "cffi", True, verify_ssl, {}, timeout)),
+        ("httpx/H2",   lambda: _do_request(f"https://{domain}", "httpx", True, verify_ssl, DYNAMIC_HEADERS, timeout)),
+        ("httpx/H1.1", lambda: _do_request(f"https://{domain}", "httpx", False, verify_ssl, DYNAMIC_HEADERS, timeout)),
+    ]
+    if try_http_fallback:
+        steps.append(("httpx/H1.0", lambda: _do_request(f"http://{domain}", "httpx", False, False, DYNAMIC_HEADERS, timeout)))
 
-        for status, count in sorted(status_counts.items(), key=lambda x: -x[1]):
-            color = STATUS_COLOR.get(status, C["reset"])
-            print(f"  {color}{ICONS.get(status, '❓')} {status}: {count}{C['reset']}")
+    last_result = None
+    for step_name, step_fn in steps:
+        # Пропускаем curl_cffi если он отключен флагом
+        if step_name.startswith("cffi") and not use_impersonate: continue
+        
+        result = await step_fn()
+        result["pipeline_step"] = step_name
+        
+        if result["status"] == "OK":
+            return result
+        last_result = result
+        
+    return last_result if last_result else {"domain": domain, "status": "UNKNOWN", "code": 0, "method": "-", "rtt_ms": 0, "details": "No pipeline steps executed", "client": "none"}
 
-    except KeyboardInterrupt:
-        print(f"\n{C['yellow']}⚠️  Прервано пользователем (Ctrl+C){C['reset']}")
-    finally:
-        await connector.close()
+async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: list, 
+                      verify_ssl: bool, verbose: bool, jitter: float, use_impersonate: bool, 
+                      try_http_fallback: bool) -> Dict[str, dict]:
+    results = {}
+    print(f"🔍 Этап 1/2: DNS-резолв ({len(domains)} доменов)...")
+    dns_sem = asyncio.Semaphore(CONFIG["concurrency"] * 2)
+    
+    async def resolve(d: str):
+        async with dns_sem: return d, await check_dns_async(d, use_custom_dns, dns_servers, CONFIG["timeout_dns"])
+    
+    dns_results = {}
+    for i, coro in enumerate(asyncio.as_completed([resolve(d) for d in domains]), 1):
+        domain, ok = await coro
+        dns_results[domain] = ok
+        if verbose and i % 200 == 0: print(f"  → DNS: {i}/{len(domains)}")
+    
+    dns_ok = sum(dns_results.values())
+    print(f"  ✅ Резолвятся: {dns_ok} | ❌ Не резолвятся: {len(domains) - dns_ok}")
+    
+    for d, ok in dns_results.items():
+        if not ok: results[d] = {"domain": d, "status": "DNS_ERR", "code": 0, "method": "-", "rtt_ms": 0, "details": "DNS failed", "client": "-", "pipeline_step": "DNS"}
+    
+    http_domains = [d for d, ok in dns_results.items() if ok]
+    if not http_domains: return results
+    
+    print(f"\n🔍 Этап 2/2: HTTP-проверка ({len(http_domains)} доменов)...")
+    print(f"   🌐 Pipeline: curl_cffi → httpx/H2 → httpx/H1.1{' → httpx/H1.0(HTTP)' if try_http_fallback else ''}")
+    
+    sem = asyncio.Semaphore(CONFIG["concurrency"])
+    async def run_pipeline(d):
+        async with sem:
+            if jitter > 0: await asyncio.sleep(random.uniform(0, jitter))
+            return await check_domain_pipeline(d, CONFIG["timeout_total"], verify_ssl, use_impersonate, try_http_fallback)
+            
+    tasks = [run_pipeline(d) for d in http_domains]
+    for i, coro in enumerate(asyncio.as_completed(tasks), 1):
+        res = await coro
+        results[res['domain']] = res
+        if verbose:
+            icon = ICONS.get(res['status'], "❓")
+            print(f"[{i}/{len(http_domains)}] {icon} {res['domain']:<40} {res['status']:<10} {res['method']:<4} ({res.get('pipeline_step','?')}) {res['details']}")
+        if i % 100 == 0: print(f"  → HTTP: {i}/{len(http_domains)}")
+    return results
 
+def save_whitelist(domains: List[str], operator: str, out_dir: str = "../build/domains_checked"):
+    ts = datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
+    path = os.path.join(out_dir, f"whitelist-{ts}-{operator}.txt")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f: f.write('\n'.join(domains) + '\n')
+    print(f"💾 Сохранено: {path}")
+
+def select_operator() -> str:
+    print("\n📱 Выберите оператора:")
+    for k, v in OPERATORS.items(): print(f"  {k}. {v}")
+    while True:
+        c = input("Введите номер (1-6): ").strip()
+        if c in OPERATORS: return OPERATORS[c]
+        print("❌ Неверный ввод")
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('directory', nargs='?', default='../src/domains')
+    parser.add_argument('-c', '--concurrency', type=int, default=CONFIG["concurrency"])
+    parser.add_argument('-q', '--quiet', action='store_true')
+    parser.add_argument('-e', '--exclude', nargs='+', default=[])
+    parser.add_argument('--dns', nargs='+', default=None)
+    parser.add_argument('--verify-ssl', action='store_true')
+    parser.add_argument('--jitter', type=float, default=0.1)
+    parser.add_argument('--no-impersonate', action='store_true')
+    parser.add_argument('--no-http-fallback', action='store_false', dest='http_fallback')
+    parser.set_defaults(http_fallback=True)
+    args = parser.parse_args()
+    
+    global USE_CURL_CFFI
+    if args.no_impersonate: USE_CURL_CFFI = False
+    CONFIG["concurrency"] = args.concurrency
+    use_dns = bool(args.dns)
+    excludes = DEFAULT_EXCLUDES.union(set(args.exclude))
+    
+    print("⚙️  Конфигурация:")
+    print(f"   timeout: connect={CONFIG['timeout_connect']}s, total={CONFIG['timeout_total']}s")
+    print(f"   concurrency: {CONFIG['concurrency']}, jitter: {args.jitter}s")
+    print(f"   dns: {'custom' if use_dns else 'system'}, ssl-verify: {args.verify_ssl}")
+    print(f"   masking: {'curl_cffi (auto)' if USE_CURL_CFFI else 'httpx only'}")
+    print(f"   http-fallback: {'✅ Enabled' if args.http_fallback else '❌ Disabled'}")
+    print("-" * 85)
+    
+    files = get_files_to_process(args.directory, excludes)
+    if not files: print("❌ Нет файлов"); sys.exit(1)
+    
+    domains = load_domains_from_files(files)
+    print(f"📋 Доменов: {len(domains)}\n")
+    
+    results = await run_checker(domains, use_dns, args.dns or [], args.verify_ssl, not args.quiet, args.jitter, USE_CURL_CFFI, args.http_fallback)
+    
+    ok = [d for d, r in results.items() if r['status'] == 'OK']
+    http_ok = [d for d, r in results.items() if r['status'] == 'OK' and r.get('method') in ('H1.0', 'H1.1')]
+    
+    print(f"\n✅ Успешных: {len(ok)} (из них через HTTP/1.x: {len(http_ok)})")
+    if ok:
+        op = select_operator()
+        save_whitelist(ok, op)
+    
+    print("\n📊 Статистика:")
+    stats = {}
+    for r in results.values(): stats[r['status']] = stats.get(r['status'], 0) + 1
+    for s, c in sorted(stats.items(), key=lambda x: -x[1]):
+        print(f"  {ICONS.get(s,'❓')} {s}: {c}")
+    
+    if stats.get("BOT_BLOCK"): print(f"\n🤖 BOT_BLOCK ({stats['BOT_BLOCK']}) — возможна детекция бота")
+    if stats.get("DPI_BLOCK"): print(f"\n🔒 DPI_BLOCK ({stats['DPI_BLOCK']}) — блокировка на уровне провайдера")
+    if stats.get("TLS_ERR"): print(f"\n🔐 TLS_ERR ({stats['TLS_ERR']}) — проблемы с TLS-рукопожатием")
+    if stats.get("PORT_BLOCK"): print(f"\n🚧 PORT_BLOCK ({stats['PORT_BLOCK']}) — порт 443 заблокирован/не отвечает")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print(f"\n{C['yellow']}👋 Завершение работы...{C['reset']}")
-        sys.exit(0)
+    try: asyncio.run(main())
+    except KeyboardInterrupt: print("\n👋 Завершение"); sys.exit(0)
