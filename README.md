@@ -69,12 +69,14 @@ whitelists/
 
 ### 1. Скачивание репозитория
 
+Клонируйте репозиторий
 ```bash
-# Клонируйте репозиторий
 git clone https://github.com/kirilllavrov/whitelists.git
 cd whitelists
+```
 
-# Или скачайте ZIP-архив и распакуйте
+Или скачайте ZIP-архив и распакуйте
+```bash
 wget https://github.com/kirilllavrov/whitelists/archive/refs/heads/main.zip
 unzip main.zip
 cd whitelists
@@ -82,16 +84,17 @@ cd whitelists
 
 ### 2. Установка зависимостей
 
+Создайте виртуальное окружение (рекомендуется)
 ```bash
-# Создайте виртуальное окружение (рекомендуется)
 python3 -m venv venv
 source venv/bin/activate
-
-# Установите зависимости для check-domains.py
-pip install aiohttp httpx aiodns aioquic
-
-# Для check_ips.py дополнительные зависимости не требуются
 ```
+
+Установите зависимости для check-domains.py
+```bash
+pip install aiohttp httpx aiodns aioquic
+```
+Для check_ips.py дополнительные зависимости не требуются
 
 ### 3. Проверка доменов
 
