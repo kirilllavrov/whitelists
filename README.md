@@ -188,51 +188,74 @@ python3 merged.py
 ### 1. Скачивание репозитория
 
 **Вариант A: Через Git**
+
+Установите Git для Windows: https://git-scm.com/download/win
+
 ```powershell
-# Установите Git для Windows: https://git-scm.com/download/win
 git clone https://github.com/kirilllavrov/whitelists.git
 cd whitelists
 ```
 
 **Вариант B: ZIP-архив**
+
 1. Скачайте ZIP-архив репозитория через браузер
 2. Распакуйте в удобную директорию (например, `C:\whitelists`)
 3. Откройте PowerShell или Command Prompt и перейдите в директорию:
+
    ```powershell
    cd C:\whitelists
    ```
 
 ### 2. Установка зависимостей
 
+Проверьте версию Python (требуется 3.8+):
+
 ```powershell
-# Проверьте версию Python (требуется 3.8+)
 python --version
+```
 
-# Создайте виртуальное окружение
+Создайте виртуальное окружение:
+
+```powershell
 python -m venv venv
+```
 
-# Активируйте виртуальное окружение
+Активируйте виртуальное окружение:
+
+```powershell
 .\venv\Scripts\Activate.ps1
+```
 
 # Если возникла ошибка выполнения скриптов, выполните в PowerShell от имени администратора:
 # Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-# Установите зависимости
-pip install aiohttp httpx aiodns
+Установите зависимости:
+
+```powershell
+pip install curl_cffi httpx aiodns aiohttp
 ```
 
 ### 3. Проверка доменов
 
 ```powershell
 cd tools
+```
 
-# Базовая проверка
+Базовая проверка:
+
+```powershell
 python check-domains.py
+```
 
-# Проверка с настройками
+Проверка с настройками:
+
+```powershell
 python check-domains.py ..\src\domains -c 10 -e category-gov-ru --dns 77.88.8.8 77.88.8.1
+```
 
-# Тихий режим
+Тихий режим:
+
+```powershell
 python check-domains.py -q
 ```
 
@@ -242,13 +265,19 @@ python check-domains.py -q
 
 ```powershell
 cd tools
+```
 
-# Создайте директорию для IP-файлов
+Создайте директорию для IP-файлов:
+
+```powershell
 mkdir ..\src\IPs
+```
 
-# Поместите файлы .txt с IP или CIDR в ..\src\IPs\
+Поместите файлы .txt с IP или CIDR в ..\src\IPs\
 
-# Запуск проверки
+Запуск проверки:
+
+```powershell
 python check_ips.py
 ```
 
