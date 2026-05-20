@@ -299,7 +299,6 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     # Читаем настройки из конфига
     network = get_config_value("network", default={})
     pipeline = get_config_value("pipeline", default={})
-    paths = get_config_value("paths", default={})
     logging_conf = get_config_value("logging", default={})
     
     timeout_dns = network.get("timeout_dns", 10)
@@ -308,7 +307,7 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     jitter = args.jitter or network.get("jitter", 0.1)
     max_retries = args.retries or network.get("retries", 1)
     verify_ssl = args.verify_ssl or network.get("verify_ssl", False)
-    use_impersonate = not args.no_impersonate and pipeline.get("use_impersonate", True)
+    use_impersonate = not args.no_impersonate and pipeline.get("use_impersonate", True) and USE_CURL_CFFI
     http_fallback = args.http_fallback if args.http_fallback is not None else pipeline.get("http_fallback", True)
     retriable_statuses = set(get_config_value("error_classification", "retriable_statuses", default=["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"]))
     show_progress_every = logging_conf.get("show_progress_every", 100)
@@ -422,15 +421,27 @@ async def main():
     parser.set_defaults(http_fallback=None)
     args = parser.parse_args()
     
-    use_dns = bool(args.dns)
+    # Читаем настройки из конфига
+    network = get_config_value("network", default={})
+    pipeline = get_config_value("pipeline", default={})
     paths = get_config_value("paths", default={})
+    
+    # Определяем все переменные ДО их использования
+    use_dns = bool(args.dns)
     domains_dir = args.directory or paths.get("domains_directory", "../src/domains")
     excludes = set(paths.get("exclude_categories", [])) | set(args.exclude)
     
-    network = get_config_value("network", default={})
+    # Определяем параметры запуска
+    use_impersonate = not args.no_impersonate and pipeline.get("use_impersonate", True) and USE_CURL_CFFI
+    http_fallback = args.http_fallback if args.http_fallback is not None else pipeline.get("http_fallback", True)
+    verify_ssl = args.verify_ssl or network.get("verify_ssl", False)
+    max_retries = args.retries or network.get("retries", 1)
+    jitter = args.jitter or network.get("jitter", 0.1)
+    concurrency = args.concurrency or network.get("concurrency", 5)
     
+    # Вывод настроек (теперь все переменные определены)
     print("⚙️  Настройки проверки:")
-    print(f"   Одновременных запросов: {args.concurrency or network.get('concurrency', 5)}")
+    print(f"   Одновременных запросов: {concurrency}")
     print(f"   Эмуляция браузера: {'✅ Вкл' if use_impersonate else '❌ Выкл'}")
     print(f"   Резервный HTTP (80): {'✅ Вкл' if http_fallback else '❌ Выкл'}")
     print(f"   Проверка SSL: {'✅ Да' if verify_ssl else '❌ Нет'}")
@@ -438,18 +449,21 @@ async def main():
     print(f"   Случайная пауза: {jitter} сек")
     print("-" * 45)
     
+    # Получаем файлы и домены
     files = get_files_to_process(domains_dir, excludes)
     if not files:
         print("❌ Нет файлов")
         sys.exit(1)
     
     domains = load_domains_from_files(files)
-    print(f"📋 Доменов: {len(domains)}\n")
+    print(f"📋 Загружено доменов: {len(domains)}\n")
     
+    # Запускаем проверку
     results = await run_checker(domains, use_dns, args.dns or [], args)
     
-    ok = [d for d, r in results.items() if r['status'] == 'OK']
-    http_ok = [d for d, r in results.items() if r['status'] == 'OK' and 'H1.' in r.get('method', '')]
+    # Статистика
+    ok = [d for d, r in results.items() if r.get('status') == 'OK']
+    http_ok = [d for d, r in results.items() if r.get('status') == 'OK' and 'H1.' in r.get('method', '')]
     
     print(f"\n✅ Успешных: {len(ok)} (из них через HTTP/1.x: {len(http_ok)})")
     if ok:
@@ -460,7 +474,7 @@ async def main():
     print("\n📊 Статистика:")
     stats = {}
     for r in results.values():
-        stats[r['status']] = stats.get(r['status'], 0) + 1
+        stats[r.get('status', 'UNKNOWN')] = stats.get(r.get('status', 'UNKNOWN'), 0) + 1
     for s, c in sorted(stats.items(), key=lambda x: -x[1]):
         print(f"  {ICONS.get(s, '❓')} {s}: {c}")
     
