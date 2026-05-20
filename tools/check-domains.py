@@ -106,8 +106,8 @@ def classify_error(error: Exception) -> Tuple[str, str]:
     if "timeout" in err_str or "timed out" in err_str: return "TIMEOUT", "Request timed out"
     if "ssl" in err_str or "certificate" in err_str: return "SSL_ERR", "SSL/TLS error"
     if "redirect" in err_str or "max redirect" in err_str: return "HTTP_ERR", "Too many redirects"
-    if hasattr(error, 'response'):
-        c = getattr(error.response, 'status_code', 0)
+    if isinstance(error, httpx.HTTPStatusError):
+        c = error.response.status_code
         return "BOT_BLOCK" if c in (403, 429, 503) else "HTTP_ERR", f"HTTP {c}"
     return "UNKNOWN", f"{type(error).__name__}: {error}"
 
