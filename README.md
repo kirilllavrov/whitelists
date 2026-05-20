@@ -107,7 +107,7 @@ pip install curl_cffi httpx aiodns
 cd tools
 ```
 
-Первый запуск скрипта для создания конфига (configs/check-domains.json) и загрузки данных для работы curl_cffi:
+Первый запуск скрипта для создания конфига и загрузки данных для работы curl_cffi:
 
 ```bash
 python check-domains.py
