@@ -107,10 +107,10 @@ pip install curl_cffi httpx aiodns
 cd tools
 ```
 
-Первый запуск скрипта для создания конфига и загрузки данных для работы curl_cffi:
+Первый холодный запуск скрипта для загрузки fingerprints:
 
 ```bash
-python check-domains.py
+python check-domains.py --update-fingerprints --force-update
 ```
 
 Базовая проверка (использует домены из ../src/domains/):
