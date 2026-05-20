@@ -94,7 +94,7 @@ source venv/bin/activate
 Установите зависимости для check-domains.py:
 
 ```bash
-pip install curl_cffi httpx aiodns
+pip install curl_cffi httpx aiodns aiohttp
 ```
 
 Для check_ips.py дополнительные зависимости не требуются
