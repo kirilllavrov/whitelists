@@ -404,8 +404,11 @@ def select_operator(operators: dict) -> str:
     print("\n📱 Выберите оператора:")
     for k, v in operators.items():
         print(f"  {k}. {v}")
+    
+    # Формируем приглашение с доступными номерами
+    available = ', '.join(operators.keys())
     while True:
-        c = input("Введите номер (1-6): ").strip()
+        c = input(f"Введите номер ({available}): ").strip()
         if c in operators:
             return operators[c]
         print("❌ Неверный ввод")
