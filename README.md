@@ -107,12 +107,6 @@ pip install curl_cffi httpx aiodns aiohttp
 cd tools
 ```
 
-Первый холодный запуск скрипта для загрузки fingerprints:
-
-```bash
-python check-domains.py --update-fingerprints --force-update
-```
-
 Базовая проверка (использует домены из ../src/domains/):
 
 ```bash
@@ -133,8 +127,6 @@ python3 check-domains.py ../src/domains \
     --no-impersonate \                      # Отключить curl_cffi impersonate (использовать только httpx)
     --no-http-fallback \                    # Отключить HTTP (порт 80) как fallback вариант
     --enable-http3 \                        # Включить проверку через HTTP/3 (экспериментально)
-    --update-fingerprints \                 # Обновить отпечатки curl_cffi (запускать на машине без блокировок)
-    --force-update \                        # Принудительное обновление отпечатков (игнорируя кеш)
     --show-config \                         # Показать текущую конфигурацию и выйти
     --show-fingerprints \                   # Показать текущие отпечатки curl_cffi (deprecated, используйте --show-config)
 ```
@@ -338,8 +330,6 @@ yandex.ru
 | --no-impersonate	| False |	Отключить curl_cffi impersonate |
 | --no-http-fallback	| False |	Отключить HTTP (порт 80) fallback |
 | --enable-http3	| False |	Включить HTTP/3 проверку (экспериментально) |
-| --update-fingerprints	| False |	Обновить отпечатки curl_cffi |
-| --force-update	| False |	Принудительное обновление отпечатков |
 | --show-config	| False |	Показать текущую конфигурацию |
 | --show-fingerprints	| False |	Показать отпечатки (устаревший, используйте --show-config) |
 ----------------------------------------------------------------------------
