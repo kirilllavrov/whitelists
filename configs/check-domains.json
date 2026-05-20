@@ -58,7 +58,7 @@
   
   "paths": {
     "domains_directory": "../src/domains",
-    "output_directory": "../build/domains_checked",
+    "output_directory": "build/domains_checked",
     "exclude_categories": ["category-ru"]
   },
   
