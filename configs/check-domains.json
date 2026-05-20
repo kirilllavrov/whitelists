@@ -7,7 +7,7 @@
     "timeout_total": 15,
     "timeout_dns": 10,
     "concurrency": 5,
-    "retries": 1,
+    "retries": 2,
     "jitter": 0.1,
     "verify_ssl": false
   },
@@ -68,7 +68,10 @@
     "3": "MTS",
     "4": "Tele2",
     "5": "Yota",
-    "6": "RT"
+    "7": "Tinkoff Mobile",
+    "8": "Sber Mobile",
+    "9": "Rostelecom"
+               
   },
   
   "error_classification": {

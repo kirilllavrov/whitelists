@@ -429,15 +429,14 @@ async def main():
     
     network = get_config_value("network", default={})
     
-    print("⚙️  Конфигурация:")
-    print(f"   timeout: connect={network.get('timeout_connect', 10)}s, total={network.get('timeout_total', 15)}s, dns={network.get('timeout_dns', 10)}s")
-    print(f"   concurrency: {args.concurrency or network.get('concurrency', 5)}, jitter: {args.jitter or network.get('jitter', 0.1)}s")
-    print(f"   dns: {'custom' if use_dns else 'system'}, ssl-verify: {args.verify_ssl or network.get('verify_ssl', False)}")
-    print(f"   client: {'curl_cffi' if get_config_value('curl_cffi', 'enabled', default=True) else 'httpx only'}")
-    print(f"   impersonate: {get_config_value('curl_cffi', 'default_impersonate', default='chrome')}")
-    print(f"   http-fallback: {'✅ Enabled' if args.http_fallback is not False else '❌ Disabled'}")
-    print(f"   retries: {args.retries or network.get('retries', 1)}")
-    print("-" * 85)
+    print("⚙️  Настройки проверки:")
+    print(f"   Одновременных запросов: {args.concurrency or network.get('concurrency', 5)}")
+    print(f"   Эмуляция браузера: {'✅ Вкл' if use_impersonate else '❌ Выкл'}")
+    print(f"   Резервный HTTP (80): {'✅ Вкл' if http_fallback else '❌ Выкл'}")
+    print(f"   Проверка SSL: {'✅ Да' if verify_ssl else '❌ Нет'}")
+    print(f"   Повторы при сбоях: {max_retries}")
+    print(f"   Случайная пауза: {jitter} сек")
+    print("-" * 45)
     
     files = get_files_to_process(domains_dir, excludes)
     if not files:
