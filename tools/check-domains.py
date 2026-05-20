@@ -317,7 +317,7 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     headers = get_config_value("headers", default={})
     
     # DNS проверка
-    print(f"🔍 Этап 1/2: DNS-резолв ({len(domains)} доменов)...")
+    print(f"🔍 DNS-резолв ({len(domains)} доменов)...")
     dns_sem = asyncio.Semaphore(concurrency * 2)
     
     async def resolve(d: str):
@@ -347,8 +347,8 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
         return results
     
     http_note = " + HTTP:80 fallback" if http_fallback else ""
-    print(f"\n🔍 Этап 2/2: HTTP-проверка ({len(http_domains)} доменов)...")
-    print(f"   🌐 Pipeline: curl_cffi → httpx/H2 → httpx/H1.1{http_note} | Ретраи: {max_retries}")
+    print(f"\n🔍 HTTP-проверка ({len(http_domains)} доменов)...")
+    print(f"   Pipeline: curl_cffi → httpx/H2 → httpx/H1.1{http_note} | Повторов: {max_retries}")
     
     client_pool = HTTPClientPool(verify_ssl, timeout_total, headers, impersonate)
     sem = asyncio.Semaphore(concurrency)
@@ -381,13 +381,24 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     return results
 
 def save_whitelist(domains: List[str], operator: str, out_dir: str):
+    """Сохраняет список успешных доменов в файл."""
     out_path = PROJECT_ROOT / out_dir
+    out_path.mkdir(parents=True, exist_ok=True)
+    
     ts = datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     path = out_path / f"whitelist-{ts}-{operator}.txt"
-    out_path.mkdir(parents=True, exist_ok=True)
+    
     with open(path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(domains) + '\n')
+    
     print(f"💾 Сохранено: {path}")
+    print(f"   Всего доменов в whitelist: {len(domains)}")
+    
+    # Также сохраняем копию как latest-{operator}.txt
+    latest_path = out_path / f"latest-{operator}.txt"
+    with open(latest_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(domains) + '\n')
+    print(f"   Актуальный список: {latest_path}")
 
 def select_operator(operators: dict) -> str:
     print("\n📱 Выберите оператора:")
@@ -439,7 +450,7 @@ async def main():
     jitter = args.jitter or network.get("jitter", 0.1)
     concurrency = args.concurrency or network.get("concurrency", 5)
     
-    # Вывод настроек (теперь все переменные определены)
+    # Вывод настроек
     print("⚙️  Настройки проверки:")
     print(f"   Одновременных запросов: {concurrency}")
     print(f"   Эмуляция браузера: {'✅ Вкл' if use_impersonate else '❌ Выкл'}")
@@ -455,6 +466,7 @@ async def main():
         print("❌ Нет файлов")
         sys.exit(1)
     
+    print(f"📁 Файлы: {', '.join([f.name for f in files])}")
     domains = load_domains_from_files(files)
     print(f"📋 Загружено доменов: {len(domains)}\n")
     
@@ -462,29 +474,45 @@ async def main():
     results = await run_checker(domains, use_dns, args.dns or [], args)
     
     # Статистика
-    ok = [d for d, r in results.items() if r.get('status') == 'OK']
+    ok_domains = [d for d, r in results.items() if r.get('status') == 'OK']
     http_ok = [d for d, r in results.items() if r.get('status') == 'OK' and 'H1.' in r.get('method', '')]
     
-    print(f"\n✅ Успешных: {len(ok)} (из них через HTTP/1.x: {len(http_ok)})")
-    if ok:
+    print(f"\n✅ Успешных: {len(ok_domains)} (из них через HTTP/1.x: {len(http_ok)})")
+    print(f"❌ Неудачных: {len(domains) - len(ok_domains)}")
+    
+    # Сохраняем результаты
+    if ok_domains:
         operators = get_config_value("operators", default={"1": "Default"})
         op = select_operator(operators)
-        save_whitelist(ok, op, paths.get("output_directory", "../build/domains_checked"))
+        save_whitelist(ok_domains, op, paths.get("output_directory", "../build/domains_checked"))
+    else:
+        print("\n⚠️ Нет успешных доменов для сохранения")
     
-    print("\n📊 Статистика:")
+    # Детальная статистика по статусам
+    print("\n📊 Статистика по статусам:")
     stats = {}
     for r in results.values():
-        stats[r.get('status', 'UNKNOWN')] = stats.get(r.get('status', 'UNKNOWN'), 0) + 1
-    for s, c in sorted(stats.items(), key=lambda x: -x[1]):
-        print(f"  {ICONS.get(s, '❓')} {s}: {c}")
+        status = r.get('status', 'UNKNOWN')
+        stats[status] = stats.get(status, 0) + 1
     
-    if stats.get("BOT_BLOCK"):
+    for status, count in sorted(stats.items(), key=lambda x: -x[1]):
+        icon = ICONS.get(status, "❓")
+        print(f"  {icon} {status}: {count}")
+    
+    # Дополнительная диагностика
+    if stats.get("BOT_BLOCK", 0) > 0:
         print(f"\n🤖 BOT_BLOCK ({stats['BOT_BLOCK']}) — возможна детекция бота")
+        print("   Попробуйте обновить curl_cffi: pip install --upgrade curl_cffi")
+    
     if stats.get("TIMEOUT", 0) > len(domains) * 0.3:
-        print(f"\n⚠️  Много таймаутов — попробуйте уменьшить concurrency")
+        print(f"\n⚠️  Много таймаутов ({stats.get('TIMEOUT', 0)}) — попробуйте:")
+        print("   - Уменьшить concurrency (сейчас {concurrency})")
+        print("   - Увеличить таймауты в configs/check-domains.json")
     
     if SHUTDOWN_REQUESTED:
         print("\n⚠️  Проверка была прервана досрочно")
+        if ok_domains:
+            print(f"   Но {len(ok_domains)} доменов уже проверено и сохранено")
 
 if __name__ == "__main__":
     try:
