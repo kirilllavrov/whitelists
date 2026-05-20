@@ -3,7 +3,7 @@
 Проверка доменов на доступность при обходе блокировок.
 Все параметры конфигурации берутся из configs/check-domains.json
 
-Зависимости: pip install curl_cffi httpx aiodns
+Зависимости: pip install curl_cffi httpx aiodns aiohttp
 """
 import asyncio
 import sys
@@ -55,60 +55,17 @@ def signal_handler(signum, frame):
     if not SHUTDOWN_REQUESTED:
         SHUTDOWN_REQUESTED = True
         print("\n⚠️  Получен сигнал завершения, останавливаемся...")
-        print("   Нажмите Ctrl+C ещё раз для принудительного выхода")
 
 def load_config() -> Dict[str, Any]:
     """Загружает конфигурацию из JSON файла."""
     if not CONFIG_FILE.exists():
         print(f"❌ Файл конфигурации не найден: {CONFIG_FILE}")
         print("   Пожалуйста, создайте configs/check-domains.json вручную")
-        print("   Пример конфигурации:")
-        print("""
-{
-  "network": {
-    "timeout_connect": 10,
-    "timeout_total": 15,
-    "timeout_dns": 10,
-    "concurrency": 5,
-    "retries": 1,
-    "jitter": 0.1,
-    "verify_ssl": false
-  },
-  "pipeline": {
-    "use_impersonate": true,
-    "enable_http3": false,
-    "http_fallback": true,
-    "pipeline_order": ["curl_cffi/H2", "httpx/H2", "httpx/H1.1", "httpx/H1.0"]
-  },
-  "curl_cffi": {
-    "enabled": true,
-    "default_impersonate": "chrome124",
-    "update_url": "https://fp.impersonate.pro/api/fingerprints"
-  },
-  "headers": {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-  },
-  "paths": {
-    "domains_directory": "../src/domains",
-    "output_directory": "../build/domains_checked",
-    "exclude_categories": []
-  },
-  "operators": {
-    "1": "Megafon", "2": "Beeline", "3": "MTS", "4": "Tele2", "5": "Yota", "6": "RT"
-  },
-  "logging": {
-    "show_progress_every": 100
-  }
-}
-        """)
         sys.exit(1)
     
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"❌ Ошибка парсинга JSON в {CONFIG_FILE}: {e}")
-        sys.exit(1)
     except Exception as e:
         print(f"❌ Ошибка загрузки конфига: {e}")
         sys.exit(1)
@@ -124,7 +81,7 @@ def save_config(config: Dict[str, Any]):
         return False
 
 def get_config_value(*keys, default=None):
-    """Безопасное получение значения из конфига по цепочке ключей."""
+    """Безопасное получение значения из конфига."""
     current = CONFIG
     for key in keys:
         if isinstance(current, dict):
@@ -135,32 +92,8 @@ def get_config_value(*keys, default=None):
             return default
     return current
 
-def get_available_fingerprints() -> List[str]:
-    """Получает список доступных отпечатков из curl_cffi."""
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "curl_cffi", "list"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            # Парсим вывод, ищем строки с chrome, firefox, safari
-            fingerprints = []
-            for line in result.stdout.split('\n'):
-                line = line.strip()
-                if any(browser in line.lower() for browser in ['chrome', 'firefox', 'safari', 'edge']):
-                    # Извлекаем имя отпечатка
-                    parts = line.split()
-                    if parts:
-                        fingerprints.append(parts[0])
-            return fingerprints
-    except Exception:
-        pass
-    return []
-
 async def update_curl_cffi_fingerprints(force: bool = False) -> bool:
-    """Обновляет отпечатки curl_cffi."""
+    """Обновляет отпечатки curl_cffi через API."""
     if not USE_CURL_CFFI:
         print("❌ curl_cffi не установлен")
         print("   Установите: pip install curl_cffi")
@@ -168,125 +101,141 @@ async def update_curl_cffi_fingerprints(force: bool = False) -> bool:
     
     print("🔄 Обновление отпечатков curl_cffi...")
     
-    # Проверяем доступность интернета
+    # Проверка интернета простым пингом
     try:
-        import socket
-        socket.create_connection(("8.8.8.8", 53), timeout=3)
-        print("✅ Интернет доступен, пробуем обновить...")
-    except:
-        print("⚠️ Интернет может быть недоступен, но попробуем...")
-    
-    # Способ 1: через CLI команду curl_cffi
-    print("  Попытка 1: через curl_cffi CLI...")
-    try:
-        cmd = [sys.executable, "-m", "curl_cffi", "update"]
-        if force:
-            cmd.append("--force")
-        
-        result = await asyncio.to_thread(
-            subprocess.run, cmd,
-            capture_output=True, text=True, timeout=60
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "2", "8.8.8.8",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
-        
-        if result.returncode == 0:
-            print("  ✅ Отпечатки успешно обновлены через CLI")
-            # После обновления получаем список доступных отпечатков
-            fingerprints = get_available_fingerprints()
-            if fingerprints:
-                # Обновляем конфиг
-                if "curl_cffi" not in CONFIG:
-                    CONFIG["curl_cffi"] = {}
-                CONFIG["curl_cffi"]["fingerprints_available"] = fingerprints
-                CONFIG["curl_cffi"]["last_update"] = datetime.now().isoformat()
-                # Выбираем самый свежий Chrome
-                chrome_fps = [fp for fp in fingerprints if 'chrome' in fp.lower()]
-                if chrome_fps:
-                    # Сортируем по номеру версии
-                    chrome_fps.sort(key=lambda x: int(''.join(filter(str.isdigit, x)) or 0), reverse=True)
-                    CONFIG["curl_cffi"]["default_impersonate"] = chrome_fps[0]
-                    print(f"  📌 Установлен отпечаток: {chrome_fps[0]}")
-                save_config(CONFIG)
-            return True
+        await proc.wait()
+        if proc.returncode == 0:
+            print("✅ Интернет доступен")
         else:
-            print(f"  ⚠️ CLI обновление не удалось: {result.stderr[:100] if result.stderr else 'неизвестная ошибка'}")
-    except subprocess.TimeoutExpired:
-        print("  ⚠️ CLI обновление зависло (таймаут)")
-    except Exception as e:
-        print(f"  ⚠️ Ошибка CLI: {e}")
+            print("⚠️ Интернет может быть недоступен")
+    except:
+        pass
     
-    # Способ 2: через прямой API запрос
-    print("  Попытка 2: через прямой API запрос...")
+    # Пробуем через API с aiohttp
+    print("  Запрос свежих отпечатков через API...")
     try:
         import aiohttp
-        update_url = get_config_value("curl_cffi", "update_url", default="https://fp.impersonate.pro/api/fingerprints")
+        
+        # API для получения актуальных отпечатков
+        api_url = "https://fp.impersonate.pro/api/fingerprints"
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(update_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if "fingerprints" in data:
-                        fingerprints = data.get("fingerprints", {})
-                        # Сохраняем отпечатки в конфиг
+                    
+                    # Извлекаем отпечатки
+                    fingerprints_data = data.get("fingerprints", {})
+                    if fingerprints_data:
+                        # Обновляем конфиг
                         if "curl_cffi" not in CONFIG:
                             CONFIG["curl_cffi"] = {}
-                        CONFIG["curl_cffi"]["fingerprints_api"] = fingerprints
+                        
+                        # Сохраняем полученные отпечатки
+                        CONFIG["curl_cffi"]["fingerprints_api"] = fingerprints_data
                         CONFIG["curl_cffi"]["last_update"] = datetime.now().isoformat()
                         
-                        # Выбираем последний Chrome
-                        chrome_versions = [k for k in fingerprints.keys() if 'chrome' in k.lower()]
+                        # Определяем самый свежий Chrome
+                        chrome_versions = []
+                        for key in fingerprints_data.keys():
+                            if 'chrome' in key.lower():
+                                chrome_versions.append(key)
+                        
                         if chrome_versions:
+                            # Сортируем по версии
                             chrome_versions.sort()
-                            CONFIG["curl_cffi"]["default_impersonate"] = chrome_versions[-1]
-                            print(f"  ✅ Отпечатки обновлены через API")
-                            print(f"  📌 Установлен отпечаток: {chrome_versions[-1]}")
+                            latest_chrome = chrome_versions[-1]
+                            CONFIG["curl_cffi"]["default_impersonate"] = latest_chrome
+                            print(f"  ✅ Отпечатки обновлены!")
+                            print(f"  📌 Установлен отпечаток: {latest_chrome}")
+                            print(f"  📅 Всего получено: {len(fingerprints_data)} профилей")
                             save_config(CONFIG)
                             return True
+                        else:
+                            print(f"  ⚠️ Chrome отпечатки не найдены, но другие есть")
+                            # Берём первый попавшийся
+                            first_key = list(fingerprints_data.keys())[0]
+                            CONFIG["curl_cffi"]["default_impersonate"] = first_key
+                            save_config(CONFIG)
+                            return True
+                    else:
+                        print("  ⚠️ API вернул пустые данные")
+                else:
+                    print(f"  ⚠️ API вернул код {resp.status}")
     except ImportError:
-        print("  ⚠️ aiohttp не установлен, пропускаем API метод")
+        print("  ⚠️ aiohttp не установлен, устанавливаем...")
+        await asyncio.to_thread(subprocess.run, [sys.executable, "-m", "pip", "install", "aiohttp"], capture_output=True)
+        print("  ✅ aiohttp установлен, попробуйте запустить обновление ещё раз")
+        return False
+    except asyncio.TimeoutError:
+        print("  ⚠️ Таймаут API запроса")
     except Exception as e:
-        print(f"  ⚠️ API ошибка: {e}")
+        print(f"  ⚠️ Ошибка API: {e}")
     
-    # Способ 3: через прямую команду curl
-    print("  Попытка 3: через системный curl...")
+    # Альтернативный метод: через прямую команду curl
+    print("  Попытка через системный curl...")
     try:
         result = await asyncio.to_thread(
             subprocess.run,
-            ["curl", "-s", "https://fp.impersonate.pro/api/fingerprints"],
+            ["curl", "-s", "-L", "https://fp.impersonate.pro/api/fingerprints"],
             capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0 and result.stdout:
-            import json as json_module
-            data = json_module.loads(result.stdout)
+            data = json.loads(result.stdout)
             if "fingerprints" in data:
-                # Аналогично сохраняем...
+                # Аналогично сохраняем
                 print("  ✅ Отпечатки получены через curl")
                 return True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠️ Ошибка curl: {e}")
     
-    print("❌ Не удалось обновить отпечатки")
-    print("\n💡 Возможные решения:")
-    print("   1. Проверьте интернет-соединение")
-    print("   2. Запустите на машине без блокировок")
-    print("   3. Или используйте ручную установку:")
-    print("      pip install --upgrade curl_cffi")
-    print("      python -m curl_cffi update")
+    print("\n❌ Не удалось обновить отпечатки")
+    print("\n💡 Ручное обновление (рекомендуется):")
+    print("   1. Перейдите на https://fp.impersonate.pro/api/fingerprints")
+    print("   2. Скопируйте актуальные отпечатки вручную")
+    print("   3. Обновите configs/check-domains.json в разделе curl_cffi")
+    print("\n   Или просто обновите библиотеку:")
+    print("   pip install --upgrade curl_cffi")
+    print("   pip install --upgrade curl_cffi --pre  # для бета-версии")
+    
     return False
+
+async def show_fingerprints_status():
+    """Показывает статус отпечатков в конфиге."""
+    curl_config = get_config_value("curl_cffi", default={})
+    last_update = curl_config.get("last_update")
+    
+    print("\n🔐 Статус отпечатков curl_cffi:")
+    print(f"   Версия библиотеки: {curl_cffi_version}")
+    print(f"   Используемый отпечаток: {curl_config.get('default_impersonate', 'не задан')}")
+    print(f"   Последнее обновление: {last_update if last_update else 'никогда'}")
+    
+    if last_update:
+        days = (datetime.now() - datetime.fromisoformat(last_update)).days
+        if days <= 7:
+            print(f"   📅 Статус: свежие ({days} дней назад)")
+        elif days <= 30:
+            print(f"   ⚠️ Статус: устаревают ({days} дней назад)")
+        else:
+            print(f"   ❌ Статус: устарели ({days} дней назад) — рекомендуется обновить")
+    
+    # Проверяем, есть ли сохранённые отпечатки из API
+    if curl_config.get("fingerprints_api"):
+        api_fps = curl_config["fingerprints_api"]
+        print(f"\n   Доступно отпечатков в кеше: {len(api_fps)}")
+        # Показываем Chrome версии
+        chrome_fps = [k for k in api_fps.keys() if 'chrome' in k.lower()]
+        if chrome_fps:
+            print(f"   Chrome версии: {', '.join(sorted(chrome_fps)[-5:])}")
 
 def classify_error(error: Exception) -> Tuple[str, str]:
     """Классификация ошибок."""
     err_str = str(error).lower()
-    
-    # Проверка curl кодов
-    curl_code = None
-    m = re.search(r'curl:\s*\((\d+)\)', err_str)
-    if m:
-        curl_code = int(m.group(1))
-        if curl_code == 6: return "DNS_ERR", "Could not resolve host"
-        if curl_code == 28: return "TIMEOUT", "Operation timed out"
-        if curl_code == 35: return "TLS_ERR", "SSL/TLS error"
-        if curl_code == 7: return "PORT_BLOCK" if "refused" in err_str else "TIMEOUT", "Connection error"
-        if curl_code == 52: return "RST", "Connection reset"
     
     # Системные ошибки
     if isinstance(error, socket.gaierror): return "DNS_ERR", "DNS resolution failed"
@@ -385,18 +334,22 @@ class HTTPClientPool:
             return self.clients[key]
     
     async def get_curl(self) -> Optional[CurlCffiSession]:
-        if not USE_CURL_CFFI or not get_config_value("curl_cffi", "enabled"):
+        if not USE_CURL_CFFI or not get_config_value("curl_cffi", "enabled", default=True):
             return None
         
         async with self._lock:
             if "curl" not in self.curl_clients:
                 impersonate = await self.get_impersonate()
-                self.curl_clients["curl"] = CurlCffiSession(
-                    impersonate=impersonate,
-                    verify=self.verify_ssl,
-                    timeout=self.timeout,
-                    allow_redirects=True
-                )
+                try:
+                    self.curl_clients["curl"] = CurlCffiSession(
+                        impersonate=impersonate,
+                        verify=self.verify_ssl,
+                        timeout=self.timeout,
+                        allow_redirects=True
+                    )
+                except Exception as e:
+                    print(f"⚠️ Ошибка создания curl_cffi сессии: {e}")
+                    return None
             return self.curl_clients["curl"]
     
     async def close(self):
@@ -407,7 +360,10 @@ class HTTPClientPool:
             self.clients.clear()
             
             for client in self.curl_clients.values():
-                await client.close()
+                try:
+                    await client.close()
+                except:
+                    pass
             self.curl_clients.clear()
 
 async def check_curl_cffi(client_pool: HTTPClientPool, url: str, use_http3: bool = False) -> dict:
@@ -422,7 +378,7 @@ async def check_curl_cffi(client_pool: HTTPClientPool, url: str, use_http3: bool
             raise Exception("curl_cffi not available")
         
         kwargs = {"url": url, "timeout": get_config_value("network", "timeout_total")}
-        if use_http3 and get_config_value("pipeline", "enable_http3"):
+        if use_http3 and get_config_value("pipeline", "enable_http3", default=False):
             kwargs["http_version"] = "v3"
         
         resp = await client.get(**kwargs)
@@ -469,7 +425,7 @@ async def check_domain(domain: str, client_pool: HTTPClientPool) -> dict:
     if SHUTDOWN_REQUESTED:
         return {"domain": domain, "status": "TIMEOUT", "details": "Shutdown"}
     
-    pipeline_order = get_config_value("pipeline", "pipeline_order", default=[])
+    pipeline_order = get_config_value("pipeline", "pipeline_order", default=["curl_cffi/H2", "httpx/H2", "httpx/H1.1"])
     max_retries = get_config_value("network", "retries", default=1)
     retriable = ["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"]
     http_fallback = get_config_value("pipeline", "http_fallback", default=True)
@@ -615,13 +571,18 @@ async def main():
     parser.add_argument("directory", nargs="?", help="Директория с доменами (переопределяет config)")
     parser.add_argument("-c", "--concurrency", type=int, help="Количество одновременных запросов")
     parser.add_argument("-q", "--quiet", action="store_true", help="Тихий режим")
+    parser.add_argument("-e", "--exclude", nargs="+", default=[], help="Исключить категории")
     parser.add_argument("--dns", nargs="+", help="Свои DNS серверы")
     parser.add_argument("--jitter", type=float, help="Случайная задержка")
     parser.add_argument("--retries", type=int, help="Количество ретраев")
     parser.add_argument("--verify-ssl", action="store_true", help="Проверять SSL")
+    parser.add_argument("--no-impersonate", action="store_true", help="Отключить impersonate")
+    parser.add_argument("--no-http-fallback", action="store_true", help="Отключить HTTP fallback")
+    parser.add_argument("--enable-http3", action="store_true", help="Включить HTTP/3")
     parser.add_argument("--update-fingerprints", action="store_true", help="Обновить отпечатки curl_cffi")
-    parser.add_argument("--force-update", action="store_true", help="Принудительное обновление отпечатков")
-    parser.add_argument("--show-config", action="store_true", help="Показать текущую конфигурацию")
+    parser.add_argument("--force-update", action="store_true", help="Принудительное обновление")
+    parser.add_argument("--show-config", action="store_true", help="Показать конфигурацию")
+    parser.add_argument("--show-fingerprints", action="store_true", help="Показать статус отпечатков")
     
     args = parser.parse_args()
     
@@ -630,12 +591,28 @@ async def main():
         print(json.dumps(CONFIG, indent=2, ensure_ascii=False))
         return
     
+    if args.show_fingerprints:
+        await show_fingerprints_status()
+        return
+    
     if args.update_fingerprints:
-        await update_curl_cffi_fingerprints(force=args.force_update)
+        success = await update_curl_cffi_fingerprints(force=args.force_update)
+        if success:
+            print("\n✅ Отпечатки успешно обновлены!")
+            print("   Теперь можно запускать обычную проверку: python check-domains.py")
+        else:
+            print("\n❌ Обновление не удалось")
+            print("   Попробуйте ручное обновление через pip:")
+            print("   pip install --upgrade curl_cffi")
         return
     
     # Получаем параметры с учётом переопределения через CLI
     domains_dir = args.directory or get_config_value("paths", "domains_directory", default="../src/domains")
+    
+    # Временно обновляем exclude категории из CLI
+    if args.exclude:
+        CONFIG["paths"]["exclude_categories"] = args.exclude
+    
     files = get_files_to_process(domains_dir)
     
     if not files:
@@ -653,6 +630,12 @@ async def main():
     # Временно обновляем конфиг для текущей сессии
     if args.verify_ssl:
         CONFIG["network"]["verify_ssl"] = True
+    if args.no_impersonate:
+        CONFIG["pipeline"]["use_impersonate"] = False
+    if args.no_http_fallback:
+        CONFIG["pipeline"]["http_fallback"] = False
+    if args.enable_http3:
+        CONFIG["pipeline"]["enable_http3"] = True
     if args.retries:
         CONFIG["network"]["retries"] = args.retries
     if args.jitter:
@@ -662,10 +645,10 @@ async def main():
     if not quiet:
         print(f"⚙️  Конфигурация запуска:")
         print(f"   Concurrency: {concurrency}")
-        print(f"   Impersonate: {get_config_value('pipeline', 'use_impersonate', default=True)}")
-        print(f"   HTTP/3: {get_config_value('pipeline', 'enable_http3', default=False)}")
-        print(f"   HTTP fallback: {get_config_value('pipeline', 'http_fallback', default=True)}")
-        print(f"   Verify SSL: {CONFIG['network']['verify_ssl']}")
+        print(f"   Impersonate: {'✅' if get_config_value('pipeline', 'use_impersonate', default=True) else '❌'}")
+        print(f"   HTTP/3: {'✅' if get_config_value('pipeline', 'enable_http3', default=False) else '❌'}")
+        print(f"   HTTP fallback: {'✅' if get_config_value('pipeline', 'http_fallback', default=True) else '❌'}")
+        print(f"   Verify SSL: {'✅' if CONFIG['network']['verify_ssl'] else '❌'}")
         print(f"   Retries: {CONFIG['network']['retries']}")
         print(f"   Jitter: {CONFIG['network']['jitter']}s")
         print("-" * 50)
@@ -693,7 +676,7 @@ async def main():
     # Советы
     if stats.get("BOT_BLOCK", 0) > 0:
         print("\n🤖 Обнаружена блокировка ботов — попробуйте обновить отпечатки:")
-        print("   python check-domains.py --update-fingerprints (на машине без блокировок)")
+        print("   python check-domains.py --update-fingerprints --force-update")
 
 if __name__ == "__main__":
     try:
