@@ -177,7 +177,7 @@ class HTTPClientPool:
         self.headers = headers
         self.impersonate = impersonate
         self.httpx_clients: Dict[str, httpx.AsyncClient] = {}
-        self.curl_client: Optional[CurlCffiSession] = None
+        self.curl_client: Optional[Any] = None
         self._lock = asyncio.Lock()
     
     async def get_httpx(self, http2: bool, is_http: bool = False) -> httpx.AsyncClient:
@@ -194,7 +194,7 @@ class HTTPClientPool:
                 )
             return self.httpx_clients[key]
     
-    async def get_curl(self) -> Optional[CurlCffiSession]:
+    async def get_curl(self) -> Optional[Any]:
         if not USE_CURL_CFFI or not get_config_value("curl_cffi", "enabled", default=True):
             return None
         async with self._lock:
