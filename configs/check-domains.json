@@ -1,0 +1,85 @@
+{
+  "comment": "Основной конфиг для check-domains.py",
+  "version": "2.0",
+  
+  "network": {
+    "timeout_connect": 10,
+    "timeout_total": 15,
+    "timeout_dns": 10,
+    "concurrency": 5,
+    "retries": 1,
+    "jitter": 0.1,
+    "verify_ssl": false
+  },
+  
+  "pipeline": {
+    "use_impersonate": true,
+    "enable_http3": false,
+    "http_fallback": true,
+    "pipeline_order": [
+      "curl_cffi/H2",
+      "curl_cffi/H3",
+      "httpx/H2",
+      "httpx/H1.1",
+      "httpx/H1.0"
+    ]
+  },
+  
+  "curl_cffi": {
+    "enabled": true,
+    "default_impersonate": "chrome124",
+    "fallback_impersonate": "chrome",
+    "update_url": "https://fp.impersonate.pro/api/fingerprints",
+    "fingerprints": {
+      "chrome": "chrome124",
+      "chrome_android": "chrome124",
+      "safari": "safari17_2",
+      "firefox": "firefox131",
+      "edge": "edge122"
+    }
+  },
+  
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
+    "Sec-Ch-Ua-Mobile": "?1",
+    "Sec-Ch-Ua-Platform": "\"Android\"",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Priority": "u=0, i",
+    "Connection": "keep-alive"
+  },
+  
+  "paths": {
+    "domains_directory": "../src/domains",
+    "output_directory": "../build/domains_checked",
+    "exclude_categories": ["category-ru"]
+  },
+  
+  "operators": {
+    "1": "Megafon",
+    "2": "Beeline",
+    "3": "MTS",
+    "4": "Tele2",
+    "5": "Yota",
+    "6": "RT"
+  },
+  
+  "error_classification": {
+    "retriable_statuses": ["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"],
+    "fallback_statuses": ["UNKNOWN", "TIMEOUT", "RST", "SSL_ERR", "TLS_ERR", "PORT_BLOCK"],
+    "fallback_keywords": ["protocol_error", "stream was not closed", "server disconnected"]
+  },
+  
+  "logging": {
+    "verbose": false,
+    "quiet": false,
+    "show_progress_every": 100
+  }
+}
