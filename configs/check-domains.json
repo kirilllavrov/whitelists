@@ -5,7 +5,7 @@
   "network": {
     "timeout_total": 15,
     "timeout_dns": 10,
-    "concurrency": 5,
+    "concurrency": 10,
     "retries": 2,
     "jitter": 0.1,
     "verify_ssl": false
