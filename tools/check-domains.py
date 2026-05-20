@@ -23,9 +23,11 @@ from pathlib import Path
 # 🔧 Подключение curl_cffi
 try:
     from curl_cffi.requests import AsyncSession as CurlCffiSession
+    from curl_cffi import __version__ as curl_cffi_version
     USE_CURL_CFFI = True
 except ImportError:
     USE_CURL_CFFI = False
+    curl_cffi_version = "not installed"
 
 import httpx
 import aiodns
@@ -426,8 +428,27 @@ async def main():
     parser.add_argument('--no-impersonate', action='store_true', help='Отключить impersonate')
     parser.add_argument('--no-http-fallback', action='store_false', dest='http_fallback', help='Отключить HTTP fallback')
     parser.add_argument('--retries', type=int, help='Количество ретраев')
+    parser.add_argument('--show-config', action='store_true', help='Показать текущую конфигурацию')
+    parser.add_argument('--show-fingerprints', action='store_true', help='Показать информацию об отпечатках curl_cffi')
     parser.set_defaults(http_fallback=None)
     args = parser.parse_args()
+    
+    # Режим показа конфигурации
+    if args.show_config:
+        print(json.dumps(CONFIG, indent=2, ensure_ascii=False))
+        return
+    
+    # Режим показа информации об отпечатках
+    if args.show_fingerprints:
+        curl_config = get_config_value("curl_cffi", default={})
+        print("\n🔐 Информация об отпечатках curl_cffi:")
+        print(f"   Версия библиотеки: {curl_cffi_version}")
+        print(f"   Используемый отпечаток: {curl_config.get('default_impersonate', 'chrome124')}")
+        print(f"   Доступные отпечатки в конфиге:")
+        fingerprints = curl_config.get("fingerprints", {})
+        for name, fp in fingerprints.items():
+            print(f"      • {name}: {fp}")
+        return
     
     # Читаем настройки из конфига
     network = get_config_value("network", default={})
@@ -477,11 +498,12 @@ async def main():
     print(f"\n✅ Успешных: {len(ok_domains)} (из них через HTTP/1.x: {len(http_ok)})")
     print(f"❌ Неудачных: {len(domains) - len(ok_domains)}")
     
-    # Сохраняем результаты
+    # Сохраняем результаты (исправлен путь: убрали ..)
     if ok_domains:
         operators = get_config_value("operators", default={"1": "Default"})
         op = select_operator(operators)
-        save_whitelist(ok_domains, op, paths.get("output_directory", "../build/domains_checked"))
+        out_dir = paths.get("output_directory", "build/domains_checked")
+        save_whitelist(ok_domains, op, out_dir)
     else:
         print("\n⚠️ Нет успешных доменов для сохранения")
     
@@ -501,9 +523,10 @@ async def main():
         print(f"\n🤖 BOT_BLOCK ({stats['BOT_BLOCK']}) — возможна детекция бота")
         print("   Попробуйте обновить curl_cffi: pip install --upgrade curl_cffi")
     
-    if stats.get("TIMEOUT", 0) > len(domains) * 0.3:
-        print(f"\n⚠️  Много таймаутов ({stats.get('TIMEOUT', 0)}) — попробуйте:")
-        print("   - Уменьшить concurrency (сейчас {concurrency})")
+    timeout_count = stats.get("TIMEOUT", 0)
+    if timeout_count > len(domains) * 0.3:
+        print(f"\n⚠️  Много таймаутов ({timeout_count}) — попробуйте:")
+        print(f"   - Уменьшить concurrency (сейчас {concurrency})")
         print("   - Увеличить таймауты в configs/check-domains.json")
     
     if SHUTDOWN_REQUESTED:
