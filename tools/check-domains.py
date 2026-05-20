@@ -381,7 +381,7 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     return results
 
 def save_whitelist(domains: List[str], operator: str, out_dir: str):
-    """Сохраняет список успешных доменов в файл."""
+    """Сохраняет список успешных доменов в файл с временной меткой."""
     out_path = PROJECT_ROOT / out_dir
     out_path.mkdir(parents=True, exist_ok=True)
     
@@ -393,12 +393,6 @@ def save_whitelist(domains: List[str], operator: str, out_dir: str):
     
     print(f"💾 Сохранено: {path}")
     print(f"   Всего доменов в whitelist: {len(domains)}")
-    
-    # Также сохраняем копию как latest-{operator}.txt
-    latest_path = out_path / f"latest-{operator}.txt"
-    with open(latest_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(domains) + '\n')
-    print(f"   Актуальный список: {latest_path}")
 
 def select_operator(operators: dict) -> str:
     print("\n📱 Выберите оператора:")
