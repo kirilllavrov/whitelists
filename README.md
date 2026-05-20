@@ -128,7 +128,6 @@ python3 check-domains.py ../src/domains \
     --no-http-fallback \                    # Отключить HTTP (порт 80) как fallback вариант
     --enable-http3 \                        # Включить проверку через HTTP/3 (экспериментально)
     --show-config \                         # Показать текущую конфигурацию и выйти
-    --show-fingerprints \                   # Показать текущие отпечатки curl_cffi (deprecated, используйте --show-config)
 ```
 
 Тихий режим (без подробного вывода):
@@ -360,7 +359,6 @@ yandex.ru
 | --no-http-fallback	| False |	Отключить HTTP (порт 80) fallback |
 | --enable-http3	| False |	Включить HTTP/3 проверку (экспериментально) |
 | --show-config	| False |	Показать текущую конфигурацию |
-| --show-fingerprints	| False |	Показать отпечатки (устаревший, используйте --show-config) |
 ----------------------------------------------------------------------------
 
 ### check_ips.py
