@@ -110,7 +110,7 @@ cd tools
 Первый запуск скрипта для создания конфига (configs/check-domains.json) и загрузки данных для работы curl_cffi:
 
 ```bash
-python tools/check-domains.py
+python check-domains.py
 ```
 
 Базовая проверка (использует домены из ../src/domains/):
