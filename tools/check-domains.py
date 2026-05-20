@@ -17,9 +17,11 @@ import random
 import argparse
 import logging
 import re
+import signal
 from datetime import datetime
-from typing import List, Tuple, Dict, Set
+from typing import List, Tuple, Dict, Set, Optional
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 # 🔧 Подключение curl_cffi
 try:
@@ -71,6 +73,17 @@ FALLBACK_KEYWORDS = ["protocol_error", "stream was not closed", "server disconne
 RETRIABLE_STATUSES = {"TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"}
 DEFAULT_EXCLUDES = {"category-ru"}
 OPERATORS = {"1": "Megafon", "2": "Beeline", "3": "MTS", "4": "Tele2", "5": "Yota", "6": "RT"}
+
+# Глобальный флаг для graceful shutdown
+SHUTDOWN_REQUESTED = False
+
+def signal_handler(signum, frame):
+    """Обработчик сигналов для graceful shutdown."""
+    global SHUTDOWN_REQUESTED
+    if not SHUTDOWN_REQUESTED:
+        SHUTDOWN_REQUESTED = True
+        print("\n⚠️  Получен сигнал завершения, останавливаемся... (может занять до 30 секунд)")
+        print("   Нажмите Ctrl+C ещё раз для принудительного выхода")
 
 def classify_error(error: Exception) -> Tuple[str, str]:
     """Консервативная классификация для уменьшения ложных PORT_BLOCK."""
@@ -147,56 +160,134 @@ async def check_dns_async(domain: str, use_custom_dns: bool, dns_servers: list, 
             return True
     except: return False
 
-async def _do_curl_cffi(url: str, timeout: float, verify_ssl: bool) -> dict:
+class HTTPClientPool:
+    """Пул HTTP-клиентов для переиспользования соединений."""
+    
+    def __init__(self, verify_ssl: bool, timeout: float, max_keepalive: int = 20):
+        self.verify_ssl = verify_ssl
+        self.timeout = timeout
+        self.max_keepalive = max_keepalive
+        self.clients: Dict[str, httpx.AsyncClient] = {}
+        self.curl_clients: Dict[str, CurlCffiSession] = {}
+        self._lock = asyncio.Lock()
+    
+    def _get_client_key(self, http2: bool, is_http: bool = False) -> str:
+        """Генерирует ключ для клиента."""
+        if is_http:
+            return "http1_0"
+        return f"http2_{http2}"
+    
+    async def get_httpx_client(self, http2: bool, is_http: bool = False) -> httpx.AsyncClient:
+        """Получает или создает HTTPX клиент."""
+        key = self._get_client_key(http2, is_http)
+        
+        async with self._lock:
+            if key not in self.clients:
+                client = httpx.AsyncClient(
+                    http2=http2 and not is_http,
+                    verify=self.verify_ssl,
+                    timeout=httpx.Timeout(self.timeout),
+                    follow_redirects=True,
+                    headers=CONFIG["headers"],
+                    limits=httpx.Limits(max_keepalive_connections=self.max_keepalive)
+                )
+                self.clients[key] = client
+            return self.clients[key]
+    
+    async def get_curl_client(self) -> Optional[CurlCffiSession]:
+        """Получает или создает curl_cffi клиент."""
+        if not USE_CURL_CFFI:
+            return None
+        
+        async with self._lock:
+            if "curl" not in self.curl_clients:
+                client = CurlCffiSession(
+                    impersonate="chrome",
+                    verify=self.verify_ssl,
+                    timeout=self.timeout,
+                    allow_redirects=True
+                )
+                self.curl_clients["curl"] = client
+            return self.curl_clients["curl"]
+    
+    async def close_all(self):
+        """Закрывает все клиенты."""
+        async with self._lock:
+            for client in self.clients.values():
+                await client.aclose()
+            self.clients.clear()
+            
+            for client in self.curl_clients.values():
+                await client.aclose()
+            self.curl_clients.clear()
+
+async def _do_curl_cffi(client_pool: HTTPClientPool, url: str, timeout: float, verify_ssl: bool) -> dict:
     """Запрос через curl_cffi с браузерной эмуляцией."""
     domain = url.split("://")[1].split('/')[0]
     res = {"domain": domain, "status": "", "code": 0, "method": "H2", "rtt_ms": 0, "details": "", "client": "curl_cffi"}
     start = time.time()
     try:
-        # 🔥 При impersonate заголовки игнорируются, чтобы сохранить валидный fingerprint
-        async with CurlCffiSession(impersonate="chrome", verify=verify_ssl, timeout=timeout, allow_redirects=True) as s:
-            resp = await s.get(url)
-            res.update({"rtt_ms": round((time.time()-start)*1000,1), "code": resp.status_code, 
-                        "status": "OK" if 200<=resp.status_code<400 else "HTTP_ERR", 
-                        "details": f"{resp.status_code} {getattr(resp, 'reason', 'OK')}"})
-    except Exception as e: res["status"], res["details"] = classify_error(e)
+        client = await client_pool.get_curl_client()
+        if client is None:
+            raise Exception("curl_cffi not available")
+        
+        resp = await client.get(url)
+        res.update({
+            "rtt_ms": round((time.time()-start)*1000, 1),
+            "code": resp.status_code,
+            "status": "OK" if 200 <= resp.status_code < 400 else "HTTP_ERR",
+            "details": f"{resp.status_code} {getattr(resp, 'reason', 'OK')}"
+        })
+    except Exception as e:
+        res["status"], res["details"] = classify_error(e)
     return res
 
-async def _do_httpx(url: str, timeout: float, verify_ssl: bool, http2: bool) -> dict:
+async def _do_httpx(client_pool: HTTPClientPool, url: str, timeout: float, verify_ssl: bool, http2: bool) -> dict:
     """Запрос через httpx."""
     domain = url.split("://")[1].split('/')[0]
     is_http = url.startswith("http://")
-    res = {"domain": domain, "status": "", "code": 0, 
-           "method": "H1.0" if is_http else ("H2" if http2 else "H1.1"), 
-           "rtt_ms": 0, "details": "", "client": f"httpx/{'h2' if http2 else 'h1.1'}"}
+    res = {
+        "domain": domain, "status": "", "code": 0,
+        "method": "H1.0" if is_http else ("H2" if http2 else "H1.1"),
+        "rtt_ms": 0, "details": "", "client": f"httpx/{'h2' if http2 else 'h1.1'}"
+    }
     start = time.time()
     try:
-        async with httpx.AsyncClient(http2=http2 and not is_http, verify=verify_ssl, 
-                                     timeout=httpx.Timeout(timeout), follow_redirects=True, 
-                                     headers=CONFIG["headers"]) as c:
-            resp = await c.get(url)
-            res.update({"rtt_ms": round((time.time()-start)*1000,1), "code": resp.status_code,
-                        "status": "OK" if 200<=resp.status_code<400 else "HTTP_ERR",
-                        "details": f"{resp.status_code} {resp.reason_phrase}"})
-    except httpx.ConnectTimeout: res["status"], res["details"] = "TIMEOUT", "Connection timeout"
-    except httpx.ReadTimeout: res["status"], res["details"] = "TIMEOUT", "Read timeout"
-    except Exception as e: res["status"], res["details"] = classify_error(e)
+        client = await client_pool.get_httpx_client(http2, is_http)
+        resp = await client.get(url)
+        res.update({
+            "rtt_ms": round((time.time()-start)*1000, 1),
+            "code": resp.status_code,
+            "status": "OK" if 200 <= resp.status_code < 400 else "HTTP_ERR",
+            "details": f"{resp.status_code} {resp.reason_phrase}"
+        })
+    except httpx.ConnectTimeout:
+        res["status"], res["details"] = "TIMEOUT", "Connection timeout"
+    except httpx.ReadTimeout:
+        res["status"], res["details"] = "TIMEOUT", "Read timeout"
+    except Exception as e:
+        res["status"], res["details"] = classify_error(e)
     return res
 
-async def check_domain_pipeline(domain: str, timeout: float, verify_ssl: bool, 
-                                use_impersonate: bool, try_http_fallback: bool, 
+async def check_domain_pipeline(domain: str, client_pool: HTTPClientPool, timeout: float, verify_ssl: bool,
+                                use_impersonate: bool, try_http_fallback: bool,
                                 max_retries: int = 1) -> dict:
     """4-этапный pipeline с ретраями для временных сбоев."""
+    global SHUTDOWN_REQUESTED
+    
     steps = []
     if use_impersonate and USE_CURL_CFFI:
-        steps.append(("curl_cffi/HTTPS", lambda: _do_curl_cffi(f"https://{domain}", timeout, verify_ssl)))
-    steps.append(("httpx/H2",   lambda: _do_httpx(f"https://{domain}", timeout, verify_ssl, True)))
-    steps.append(("httpx/H1.1", lambda: _do_httpx(f"https://{domain}", timeout, verify_ssl, False)))
+        steps.append(("curl_cffi/HTTPS", lambda: _do_curl_cffi(client_pool, f"https://{domain}", timeout, verify_ssl)))
+    steps.append(("httpx/H2",   lambda: _do_httpx(client_pool, f"https://{domain}", timeout, verify_ssl, True)))
+    steps.append(("httpx/H1.1", lambda: _do_httpx(client_pool, f"https://{domain}", timeout, verify_ssl, False)))
     if try_http_fallback:
-        steps.append(("httpx/H1.0", lambda: _do_httpx(f"http://{domain}", timeout, False, False)))
+        steps.append(("httpx/H1.0", lambda: _do_httpx(client_pool, f"http://{domain}", timeout, False, False)))
 
     last_result = None
     for step_name, step_fn in steps:
+        if SHUTDOWN_REQUESTED:
+            return {"domain": domain, "status": "TIMEOUT", "method": "-", "details": "Shutdown requested", "client": "system"}
+        
         for attempt in range(max_retries + 1):
             result = await step_fn()
             result["pipeline_step"] = step_name
@@ -212,71 +303,110 @@ async def check_domain_pipeline(domain: str, timeout: float, verify_ssl: bool,
                 continue
             else:
                 last_result = result
-                break # Переход к следующему шагу pipeline
+                break  # Переход к следующему шагу pipeline
     return last_result if last_result else {"domain": domain, "status": "UNKNOWN", "method": "-", "details": "No steps executed", "client": "none"}
 
-async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: list, 
-                      verify_ssl: bool, verbose: bool, jitter: float, 
+async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: list,
+                      verify_ssl: bool, verbose: bool, jitter: float,
                       use_impersonate: bool, try_http_fallback: bool, max_retries: int) -> Dict[str, dict]:
+    """Запускает проверку доменов с переиспользованием HTTP-клиентов."""
+    global SHUTDOWN_REQUESTED
+    
     results = {}
     print(f"🔍 Этап 1/2: DNS-резолв ({len(domains)} доменов)...")
     dns_sem = asyncio.Semaphore(CONFIG["concurrency"] * 2)
     
     async def resolve(d: str):
-        async with dns_sem: return d, await check_dns_async(d, use_custom_dns, dns_servers, CONFIG["timeout_dns"])
+        async with dns_sem:
+            if SHUTDOWN_REQUESTED:
+                return d, False
+            return d, await check_dns_async(d, use_custom_dns, dns_servers, CONFIG["timeout_dns"])
     
     dns_results = {}
     for i, coro in enumerate(asyncio.as_completed([resolve(d) for d in domains]), 1):
+        if SHUTDOWN_REQUESTED:
+            print("\n⚠️  Прерывание DNS-резолва...")
+            break
         domain, ok = await coro
         dns_results[domain] = ok
-        if verbose and i % 200 == 0: print(f"  → DNS: {i}/{len(domains)}")
+        if verbose and i % 200 == 0:
+            print(f"  → DNS: {i}/{len(domains)}")
     
     dns_ok = sum(dns_results.values())
     print(f"  ✅ Резолвятся: {dns_ok} | ❌ Не резолвятся: {len(domains) - dns_ok}")
     
     for d, ok in dns_results.items():
-        if not ok: results[d] = {"domain": d, "status": "DNS_ERR", "code": 0, "method": "-", "rtt_ms": 0, "details": "DNS failed", "client": "-", "pipeline_step": "DNS"}
+        if not ok:
+            results[d] = {"domain": d, "status": "DNS_ERR", "code": 0, "method": "-", "rtt_ms": 0, "details": "DNS failed", "client": "-", "pipeline_step": "DNS"}
     
     http_domains = [d for d, ok in dns_results.items() if ok]
-    if not http_domains: return results
+    if not http_domains:
+        return results
     
     http_note = " + HTTP:80 fallback" if try_http_fallback else ""
     print(f"\n🔍 Этап 2/2: HTTP-проверка ({len(http_domains)} доменов)...")
     print(f"   🌐 Pipeline: curl_cffi → httpx/H2 → httpx/H1.1{http_note} | Ретраи: {max_retries}")
     
-    sem = asyncio.Semaphore(CONFIG["concurrency"])
-    async def run_pipeline(d):
-        async with sem:
-            if jitter > 0: await asyncio.sleep(random.uniform(0, jitter))
-            return await check_domain_pipeline(d, CONFIG["timeout_total"], verify_ssl, use_impersonate, try_http_fallback, max_retries)
+    # Создаем пул HTTP-клиентов
+    client_pool = HTTPClientPool(verify_ssl, CONFIG["timeout_total"])
+    
+    try:
+        sem = asyncio.Semaphore(CONFIG["concurrency"])
+        
+        async def run_pipeline(d):
+            async with sem:
+                if SHUTDOWN_REQUESTED:
+                    return {"domain": d, "status": "TIMEOUT", "method": "-", "details": "Shutdown requested", "client": "system"}
+                if jitter > 0:
+                    await asyncio.sleep(random.uniform(0, jitter))
+                return await check_domain_pipeline(d, client_pool, CONFIG["timeout_total"], verify_ssl,
+                                                   use_impersonate, try_http_fallback, max_retries)
+        
+        tasks = [run_pipeline(d) for d in http_domains]
+        for i, coro in enumerate(asyncio.as_completed(tasks), 1):
+            if SHUTDOWN_REQUESTED:
+                # Отменяем оставшиеся задачи
+                for task in tasks:
+                    task.close()
+                break
             
-    tasks = [run_pipeline(d) for d in http_domains]
-    for i, coro in enumerate(asyncio.as_completed(tasks), 1):
-        res = await coro
-        results[res['domain']] = res
-        if verbose:
-            icon = ICONS.get(res['status'], "❓")
-            print(f"[{i}/{len(http_domains)}] {icon} {res['domain']:<40} {res['status']:<10} {res['method']:<4} ({res.get('pipeline_step','?')}) {res['details']}")
-        if i % 100 == 0: print(f"  → HTTP: {i}/{len(http_domains)}")
+            res = await coro
+            results[res['domain']] = res
+            if verbose:
+                icon = ICONS.get(res['status'], "❓")
+                print(f"[{i}/{len(http_domains)}] {icon} {res['domain']:<40} {res['status']:<10} {res['method']:<4} ({res.get('pipeline_step','?')}) {res['details']}")
+            if i % 100 == 0:
+                print(f"  → HTTP: {i}/{len(http_domains)}")
+    finally:
+        # Обязательно закрываем все клиенты
+        await client_pool.close_all()
+    
     return results
 
 def save_whitelist(domains: List[str], operator: str, out_dir: str = "../build/domains_checked"):
     ts = datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     path = os.path.join(out_dir, f"whitelist-{ts}-{operator}.txt")
     os.makedirs(out_dir, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f: f.write('\n'.join(domains) + '\n')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(domains) + '\n')
     print(f"💾 Сохранено: {path}")
 
 def select_operator() -> str:
     print("\n📱 Выберите оператора:")
-    for k, v in OPERATORS.items(): print(f"  {k}. {v}")
+    for k, v in OPERATORS.items():
+        print(f"  {k}. {v}")
     while True:
         c = input("Введите номер (1-6): ").strip()
-        if c in OPERATORS: return OPERATORS[c]
+        if c in OPERATORS:
+            return OPERATORS[c]
         print("❌ Неверный ввод")
 
 async def main():
-    parser = argparse.ArgumentParser()
+    # Настройка обработчиков сигналов для graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    parser = argparse.ArgumentParser(description='Проверка доменов на доступность при обходе блокировок')
     parser.add_argument('directory', nargs='?', default='../src/domains')
     parser.add_argument('-c', '--concurrency', type=int, default=CONFIG["concurrency"])
     parser.add_argument('-q', '--quiet', action='store_true')
@@ -290,8 +420,8 @@ async def main():
     parser.set_defaults(http_fallback=True)
     args = parser.parse_args()
     
-    global USE_CURL_CFFI
-    if args.no_impersonate: USE_CURL_CFFI = False
+    # Локальная переменная вместо глобальной
+    use_curl_cffi = USE_CURL_CFFI and not args.no_impersonate
     CONFIG["concurrency"] = args.concurrency
     use_dns = bool(args.dns)
     excludes = DEFAULT_EXCLUDES.union(set(args.exclude))
@@ -300,22 +430,24 @@ async def main():
     print(f"   timeout: connect={CONFIG['timeout_connect']}s, total={CONFIG['timeout_total']}s")
     print(f"   concurrency: {CONFIG['concurrency']}, jitter: {args.jitter}s")
     print(f"   dns: {'custom' if use_dns else 'system'}, ssl-verify: {args.verify_ssl}")
-    print(f"   client: {'curl_cffi (auto)' if USE_CURL_CFFI else 'httpx only'}")
+    print(f"   client: {'curl_cffi (auto)' if use_curl_cffi else 'httpx only'}")
     print(f"   http-fallback: {'✅ Enabled' if args.http_fallback else '❌ Disabled'}")
     print(f"   retries: {args.retries}")
     print("-" * 85)
     
     files = get_files_to_process(args.directory, excludes)
-    if not files: print("❌ Нет файлов"); sys.exit(1)
+    if not files:
+        print("❌ Нет файлов")
+        sys.exit(1)
     
     domains = load_domains_from_files(files)
     print(f"📋 Доменов: {len(domains)}\n")
     
-    results = await run_checker(domains, use_dns, args.dns or [], args.verify_ssl, 
-                                not args.quiet, args.jitter, USE_CURL_CFFI, args.http_fallback, args.retries)
+    results = await run_checker(domains, use_dns, args.dns or [], args.verify_ssl,
+                                not args.quiet, args.jitter, use_curl_cffi, args.http_fallback, args.retries)
     
     ok = [d for d, r in results.items() if r['status'] == 'OK']
-    http_ok = [d for d, r in results.items() if r['status'] == 'OK' and 'H1.' in r.get('method','')]
+    http_ok = [d for d, r in results.items() if r['status'] == 'OK' and 'H1.' in r.get('method', '')]
     
     print(f"\n✅ Успешных: {len(ok)} (из них через HTTP/1.x: {len(http_ok)})")
     if ok:
@@ -324,15 +456,23 @@ async def main():
     
     print("\n📊 Статистика:")
     stats = {}
-    for r in results.values(): stats[r['status']] = stats.get(r['status'], 0) + 1
+    for r in results.values():
+        stats[r['status']] = stats.get(r['status'], 0) + 1
     for s, c in sorted(stats.items(), key=lambda x: -x[1]):
-        print(f"  {ICONS.get(s,'❓')} {s}: {c}")
+        print(f"  {ICONS.get(s, '❓')} {s}: {c}")
     
-    if stats.get("BOT_BLOCK"): print(f"\n🤖 BOT_BLOCK ({stats['BOT_BLOCK']}) — возможна детекция бота")
-    if stats.get("DPI_BLOCK"): print(f"\n🔒 DPI_BLOCK ({stats['DPI_BLOCK']}) — блокировка на уровне провайдера")
-    if stats.get("TLS_ERR"): print(f"\n🔐 TLS_ERR ({stats['TLS_ERR']}) — проблемы с TLS-рукопожатием")
-    if stats.get("PORT_BLOCK"): print(f"\n🚧 PORT_BLOCK ({stats['PORT_BLOCK']}) — порт 443 заблокирован/не отвечает")
+    if stats.get("BOT_BLOCK"):
+        print(f"\n🤖 BOT_BLOCK ({stats['BOT_BLOCK']}) — возможна детекция бота")
+    if stats.get("DPI_BLOCK"):
+        print(f"\n🔒 DPI_BLOCK ({stats['DPI_BLOCK']}) — блокировка на уровне провайдера")
+    if stats.get("TLS_ERR"):
+        print(f"\n🔐 TLS_ERR ({stats['TLS_ERR']}) — проблемы с TLS-рукопожатием")
+    if stats.get("PORT_BLOCK"):
+        print(f"\n🚧 PORT_BLOCK ({stats['PORT_BLOCK']}) — порт 443 заблокирован/не отвечает")
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except KeyboardInterrupt: print("\n👋 Завершение"); sys.exit(0)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Принудительное завершение")
+        sys.exit(0)
