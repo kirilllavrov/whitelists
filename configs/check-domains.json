@@ -1,9 +1,8 @@
 {
   "comment": "Основной конфиг для check-domains.py",
-  "version": "2.0",
+  "version": "2.1",
   
   "network": {
-    "timeout_connect": 10,
     "timeout_total": 15,
     "timeout_dns": 10,
     "concurrency": 5,
@@ -14,22 +13,12 @@
   
   "pipeline": {
     "use_impersonate": true,
-    "enable_http3": false,
-    "http_fallback": true,
-    "pipeline_order": [
-      "curl_cffi/H2",
-      "curl_cffi/H3",
-      "httpx/H2",
-      "httpx/H1.1",
-      "httpx/H1.0"
-    ]
+    "http_fallback": true
   },
   
   "curl_cffi": {
     "enabled": true,
     "default_impersonate": "chrome124",
-    "fallback_impersonate": "chrome",
-    "update_url": "https://fp.impersonate.pro/api/fingerprints",
     "fingerprints": {
       "chrome": "chrome124",
       "chrome_android": "chrome124",
@@ -72,17 +61,13 @@
     "8": "Sber Mobile",
     "9": "Rostelecom",
     "10": "VTB Mobile"
-               
   },
   
   "error_classification": {
-    "retriable_statuses": ["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"],
-    "fallback_statuses": ["UNKNOWN", "TIMEOUT", "RST", "SSL_ERR", "TLS_ERR", "PORT_BLOCK"],
-    "fallback_keywords": ["protocol_error", "stream was not closed", "server disconnected"]
+    "retriable_statuses": ["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"]
   },
   
   "logging": {
-    "verbose": false,
     "quiet": false,
     "show_progress_every": 100
   }
