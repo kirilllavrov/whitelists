@@ -247,23 +247,56 @@ class HTTPClientPool:
                 await self.curl_client.close()
                 self.curl_client = None
 
-async def _do_curl_cffi(client_pool: HTTPClientPool, url: str) -> dict:
+async def _do_curl_cffi(client_pool: HTTPClientPool, url: str, enable_http3: bool = True) -> dict:
+    """
+    Запрос через curl_cffi с браузерной эмуляцией.
+    
+    Args:
+        client_pool: Пул HTTP-клиентов
+        url: URL для запроса
+        enable_http3: Пробовать HTTP/3 если поддерживается (по умолчанию True)
+    """
     domain = url.split("://")[1].split('/')[0]
-    res = {"domain": domain, "status": "", "code": 0, "method": "H2", "rtt_ms": 0, "details": "", "client": "curl_cffi"}
     start = time.time()
+    res = {"domain": domain, "status": "", "code": 0, "method": "?", "rtt_ms": 0, "details": "", "client": "curl_cffi"}
+    
     try:
         client = await client_pool.get_curl()
         if client is None:
             raise Exception("curl_cffi not available")
-        resp = await client.get(url)
+        
+        # Подготовка параметров запроса
+        kwargs = {"url": url}
+        
+        # Пробуем HTTP/3 если включено
+        if enable_http3:
+            kwargs["http_version"] = "v3"
+        
+        resp = await client.get(**kwargs)
+        
+        # Определяем реальную версию HTTP из ответа
+        http_version = getattr(resp, 'http_version', 0)
+        if http_version == 3:
+            method = "H3"
+        elif http_version == 2:
+            method = "H2"
+        else:
+            method = "H1"
+        
         res.update({
             "rtt_ms": round((time.time()-start)*1000, 1),
             "code": resp.status_code,
             "status": "OK" if 200 <= resp.status_code < 400 else "HTTP_ERR",
-            "details": f"{resp.status_code} {getattr(resp, 'reason', 'OK')}"
+            "details": f"{resp.status_code} {getattr(resp, 'reason', 'OK')}",
+            "method": method
         })
     except Exception as e:
         res["status"], res["details"] = classify_error(e)
+        # Если ошибка связана с HTTP/3, пробуем без него
+        if enable_http3 and "http3" in str(e).lower():
+            # Рекурсивно пробуем без HTTP/3
+            return await _do_curl_cffi(client_pool, url, enable_http3=False)
+    
     return res
 
 async def _do_httpx(client_pool: HTTPClientPool, url: str, http2: bool) -> dict:
@@ -290,12 +323,14 @@ async def _do_httpx(client_pool: HTTPClientPool, url: str, http2: bool) -> dict:
 
 async def check_domain_pipeline(domain: str, client_pool: HTTPClientPool, 
                                 use_impersonate: bool, try_http_fallback: bool, 
-                                max_retries: int, retriable_statuses: set) -> dict:
+                                max_retries: int, retriable_statuses: set,
+                                enable_http3: bool = True) -> dict:
+    """Многоэтапный pipeline с ретраями и поддержкой HTTP/3."""
     global SHUTDOWN_REQUESTED
     
     steps = []
     if use_impersonate and USE_CURL_CFFI:
-        steps.append(("curl_cffi/HTTPS", lambda: _do_curl_cffi(client_pool, f"https://{domain}")))
+        steps.append(("curl_cffi/HTTPS", lambda: _do_curl_cffi(client_pool, f"https://{domain}", enable_http3=enable_http3)))
     steps.append(("httpx/H2", lambda: _do_httpx(client_pool, f"https://{domain}", True)))
     steps.append(("httpx/H1.1", lambda: _do_httpx(client_pool, f"https://{domain}", False)))
     if try_http_fallback:
@@ -342,12 +377,13 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     verify_ssl = args.verify_ssl or network.get("verify_ssl", False)
     use_impersonate = not args.no_impersonate and pipeline.get("use_impersonate", True) and USE_CURL_CFFI
     http_fallback = args.http_fallback if args.http_fallback is not None else pipeline.get("http_fallback", True)
+    enable_http3 = pipeline.get("enable_http3", True)  # HTTP/3 по умолчанию включён
     retriable_statuses = set(get_config_value("error_classification", "retriable_statuses", default=["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"]))
     show_progress_every = logging_conf.get("show_progress_every", 100)
     verbose = not (args.quiet or logging_conf.get("quiet", False))
     
     impersonate = get_config_value("curl_cffi", "default_impersonate", default="chrome")
-    validate_impersonate(impersonate)  # Проверяем отпечаток
+    validate_impersonate(impersonate)
     headers = get_config_value("headers", default={})
     
     # DNS проверка с прогресс-баром
@@ -393,8 +429,9 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
         return results
     
     http_note = " + HTTP:80 fallback" if http_fallback else ""
+    http3_note = " + HTTP/3" if enable_http3 else ""
     print(f"\n🔍 HTTP-проверка ({len(http_domains)} доменов)...")
-    print(f"   Pipeline: curl_cffi → httpx/H2 → httpx/H1.1{http_note} | Повторов: {max_retries}")
+    print(f"   Pipeline: curl_cffi{http3_note} → httpx/H2 → httpx/H1.1{http_note} | Повторов: {max_retries}")
     
     client_pool = HTTPClientPool(verify_ssl, timeout_total, headers, impersonate)
     sem = asyncio.Semaphore(concurrency)
@@ -405,13 +442,12 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
                 return {"domain": d, "status": "TIMEOUT", "method": "-", "details": "Shutdown requested"}
             if jitter > 0:
                 await asyncio.sleep(random.uniform(0, jitter))
-            return await check_domain_pipeline(d, client_pool, use_impersonate, http_fallback, max_retries, retriable_statuses)
+            return await check_domain_pipeline(d, client_pool, use_impersonate, http_fallback, max_retries, retriable_statuses, enable_http3)
     
     try:
         tasks = [run_pipeline(d) for d in http_domains]
         
         if TQDM_AVAILABLE and not args.quiet:
-            # Собираем результаты с прогресс-баром
             pbar = tqdm(total=len(http_domains), desc="  HTTP прогресс", unit="домен")
             for coro in asyncio.as_completed(tasks):
                 if SHUTDOWN_REQUESTED:
@@ -457,7 +493,6 @@ def select_operator(operators: dict) -> str:
     for k, v in operators.items():
         print(f"  {k}. {v}")
     
-    # Формируем приглашение с доступными номерами
     available = ', '.join(operators.keys())
     while True:
         c = input(f"Введите номер ({available}): ").strip()
@@ -483,10 +518,11 @@ async def main():
     parser.add_argument('--jitter', type=float, help='Случайная задержка')
     parser.add_argument('--no-impersonate', action='store_true', help='Отключить impersonate')
     parser.add_argument('--no-http-fallback', action='store_false', dest='http_fallback', help='Отключить HTTP fallback')
+    parser.add_argument('--no-http3', action='store_false', dest='enable_http3', help='Отключить HTTP/3')
     parser.add_argument('--retries', type=int, help='Количество ретраев')
     parser.add_argument('--show-config', action='store_true', help='Показать текущую конфигурацию')
     parser.add_argument('--show-fingerprints', action='store_true', help='Показать информацию об отпечатках curl_cffi')
-    parser.set_defaults(http_fallback=None)
+    parser.set_defaults(http_fallback=None, enable_http3=True)
     args = parser.parse_args()
     
     # Режим показа конфигурации
@@ -523,6 +559,7 @@ async def main():
     # Определяем параметры запуска
     use_impersonate = not args.no_impersonate and pipeline.get("use_impersonate", True) and USE_CURL_CFFI
     http_fallback = args.http_fallback if args.http_fallback is not None else pipeline.get("http_fallback", True)
+    enable_http3 = args.enable_http3 and pipeline.get("enable_http3", True)
     verify_ssl = args.verify_ssl or network.get("verify_ssl", False)
     max_retries = args.retries or network.get("retries", 1)
     jitter = args.jitter or network.get("jitter", 0.1)
@@ -532,6 +569,7 @@ async def main():
     print("⚙️  Настройки проверки:")
     print(f"   Одновременных запросов: {concurrency}")
     print(f"   Эмуляция браузера: {'✅ Вкл' if use_impersonate else '❌ Выкл'}")
+    print(f"   HTTP/3: {'✅ Вкл' if enable_http3 else '❌ Выкл'}")
     print(f"   Резервный HTTP (80): {'✅ Вкл' if http_fallback else '❌ Выкл'}")
     print(f"   Проверка SSL: {'✅ Да' if verify_ssl else '❌ Нет'}")
     print(f"   Повторы при сбоях: {max_retries}")
