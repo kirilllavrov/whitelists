@@ -190,7 +190,7 @@ async def check_dns_async(domain: str, use_custom_dns: bool, dns_servers: list, 
     try:
         if use_custom_dns and dns_servers:
             resolver = aiodns.DNSResolver(nameservers=dns_servers)
-            await asyncio.wait_for(resolver.query(domain, 'A'), timeout=timeout)
+            await asyncio.wait_for(resolver.query_dns(domain, 'A'), timeout=timeout)
             return True
         else:
             loop = asyncio.get_running_loop()
