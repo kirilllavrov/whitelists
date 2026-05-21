@@ -3,7 +3,7 @@
 Проверка доменов на доступность при обходе блокировок.
 Все настройки берутся из configs/check-domains.json
 
-Зависимости: pip install curl_cffi httpx aiodns
+Зависимости: pip install curl_cffi httpx aiodns tqdm
 """
 import asyncio
 import sys
@@ -31,6 +31,25 @@ except ImportError:
 
 import httpx
 import aiodns
+
+# ✅ Прогресс-бар
+try:
+    from tqdm.asyncio import tqdm as asyncio_tqdm
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    # Создаём заглушки
+    class asyncio_tqdm:
+        @staticmethod
+        def as_completed(coros, total=None, desc=None):
+            return asyncio.as_completed(coros)
+    class tqdm:
+        def __init__(self, *args, **kwargs): pass
+        def update(self, *args, **kwargs): pass
+        def close(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
 
 # ✅ Тишина в логах библиотек
 for name in ('httpx', 'httpcore', 'aiodns', 'asyncio', 'curl_cffi'):
@@ -85,6 +104,18 @@ def get_config_value(*keys, default=None):
         if current is None:
             return default
     return current
+
+def validate_impersonate(impersonate: str) -> bool:
+    """Проверяет, существует ли указанный отпечаток."""
+    fingerprints = get_config_value("curl_cffi", "fingerprints", default={})
+    valid_values = set(fingerprints.values())
+    
+    if impersonate not in valid_values:
+        print(f"⚠️  Внимание: отпечаток '{impersonate}' не найден в списке fingerprints")
+        print(f"   Доступные отпечатки: {', '.join(sorted(valid_values))}")
+        print(f"   Будет использован '{impersonate}' (передаётся напрямую в curl_cffi)")
+        return False
+    return True
 
 def classify_error(error: Exception) -> Tuple[str, str]:
     """Классификация ошибок."""
@@ -316,9 +347,10 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     verbose = not (args.quiet or logging_conf.get("quiet", False))
     
     impersonate = get_config_value("curl_cffi", "default_impersonate", default="chrome")
+    validate_impersonate(impersonate)  # Проверяем отпечаток
     headers = get_config_value("headers", default={})
     
-    # DNS проверка
+    # DNS проверка с прогресс-баром
     print(f"🔍 DNS-резолв ({len(domains)} доменов)...")
     dns_sem = asyncio.Semaphore(concurrency * 2)
     
@@ -329,13 +361,25 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
             return d, await check_dns_async(d, use_custom_dns, dns_servers, timeout_dns)
     
     dns_results = {}
-    for i, coro in enumerate(asyncio.as_completed([resolve(d) for d in domains]), 1):
-        if SHUTDOWN_REQUESTED:
-            break
-        domain, ok = await coro
-        dns_results[domain] = ok
-        if verbose and i % show_progress_every == 0:
-            print(f"  → DNS: {i}/{len(domains)}")
+    dns_tasks = [resolve(d) for d in domains]
+    
+    if TQDM_AVAILABLE and not args.quiet:
+        pbar = tqdm(total=len(domains), desc="  DNS прогресс", unit="домен")
+        for coro in asyncio.as_completed(dns_tasks):
+            if SHUTDOWN_REQUESTED:
+                break
+            domain, ok = await coro
+            dns_results[domain] = ok
+            pbar.update(1)
+        pbar.close()
+    else:
+        for i, coro in enumerate(asyncio.as_completed(dns_tasks), 1):
+            if SHUTDOWN_REQUESTED:
+                break
+            domain, ok = await coro
+            dns_results[domain] = ok
+            if verbose and i % show_progress_every == 0:
+                print(f"  → DNS: {i}/{len(domains)}")
     
     dns_ok = sum(dns_results.values())
     print(f"  ✅ Резолвятся: {dns_ok} | ❌ Не резолвятся: {len(domains) - dns_ok}")
@@ -365,18 +409,30 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     
     try:
         tasks = [run_pipeline(d) for d in http_domains]
-        for i, coro in enumerate(asyncio.as_completed(tasks), 1):
-            if SHUTDOWN_REQUESTED:
-                break
-            
-            res = await coro
-            results[res['domain']] = res
-            
-            icon = ICONS.get(res['status'], "❓")
-            print(f"[{i}/{len(http_domains)}] {icon} {res['domain']:<40} {res['status']:<10} {res.get('method','?'):<4} ({res.get('pipeline_step','?')}) {res['details']}")
-            
-            if not verbose and i % show_progress_every == 0:
-                print(f"  → Прогресс: {i}/{len(http_domains)}")
+        
+        if TQDM_AVAILABLE and not args.quiet:
+            # Собираем результаты с прогресс-баром
+            pbar = tqdm(total=len(http_domains), desc="  HTTP прогресс", unit="домен")
+            for coro in asyncio.as_completed(tasks):
+                if SHUTDOWN_REQUESTED:
+                    break
+                res = await coro
+                results[res['domain']] = res
+                pbar.update(1)
+            pbar.close()
+        else:
+            for i, coro in enumerate(asyncio.as_completed(tasks), 1):
+                if SHUTDOWN_REQUESTED:
+                    break
+                res = await coro
+                results[res['domain']] = res
+                
+                if verbose:
+                    icon = ICONS.get(res['status'], "❓")
+                    print(f"[{i}/{len(http_domains)}] {icon} {res['domain']:<40} {res['status']:<10} {res.get('method','?'):<4} ({res.get('pipeline_step','?')}) {res['details']}")
+                
+                if not verbose and i % show_progress_every == 0:
+                    print(f"  → Прогресс: {i}/{len(http_domains)}")
     finally:
         await client_pool.close()
     
@@ -450,6 +506,10 @@ async def main():
             print(f"      • {name}: {fp}")
         return
     
+    # Проверка установки tqdm (не критично)
+    if not TQDM_AVAILABLE and not args.quiet:
+        print("💡 Для красивого прогресс-бара установите tqdm: pip install tqdm")
+    
     # Читаем настройки из конфига
     network = get_config_value("network", default={})
     pipeline = get_config_value("pipeline", default={})
@@ -476,6 +536,7 @@ async def main():
     print(f"   Проверка SSL: {'✅ Да' if verify_ssl else '❌ Нет'}")
     print(f"   Повторы при сбоях: {max_retries}")
     print(f"   Случайная пауза: {jitter} сек")
+    print(f"   Прогресс-бар: {'✅ tqdm' if TQDM_AVAILABLE else '❌ стандартный'}")
     print("-" * 45)
     
     # Получаем файлы и домены
@@ -498,7 +559,7 @@ async def main():
     print(f"\n✅ Успешных: {len(ok_domains)} (из них через HTTP/1.x: {len(http_ok)})")
     print(f"❌ Неудачных: {len(domains) - len(ok_domains)}")
     
-    # Сохраняем результаты (исправлен путь: убрали ..)
+    # Сохраняем результаты
     if ok_domains:
         operators = get_config_value("operators", default={"1": "Default"})
         op = select_operator(operators)
