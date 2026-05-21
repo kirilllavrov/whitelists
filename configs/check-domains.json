@@ -1,6 +1,6 @@
 {
   "comment": "Основной конфиг для check-domains.py",
-  "version": "2.1",
+  "version": "2.2",
   
   "network": {
     "timeout_total": 15,
