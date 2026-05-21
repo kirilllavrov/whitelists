@@ -69,7 +69,7 @@ CONFIG: Dict[str, Any] = {}
 ICONS = {
     "OK": "✅", "RST": "❌", "TIMEOUT": "🕐",
     "SSL_ERR": "🔐", "HTTP_ERR": "⚠️", "DNS_ERR": "🌐",
-    "UNKNOWN": "❓", "DPI_BLOCK": "🔒", "UNREACH": "🚫", "BOT_BLOCK": "🤖",
+    "UNKNOWN": "❌", "DPI_BLOCK": "🔒", "UNREACH": "🚫", "BOT_BLOCK": "🤖",
     "TLS_ERR": "🔐", "HTTP2_ERR": "⚠️", "PORT_BLOCK": "🚧", "HTTP_OK": "🌐"
 }
 
@@ -110,7 +110,7 @@ def validate_impersonate(impersonate: str) -> bool:
     fingerprints = get_config_value("curl_cffi", "fingerprints", default={})
     valid_values = set(fingerprints.values())
     
-    if impersonate not in valid_values:
+    if valid_values and impersonate not in valid_values:
         print(f"⚠️  Внимание: отпечаток '{impersonate}' не найден в списке fingerprints")
         print(f"   Доступные отпечатки: {', '.join(sorted(valid_values))}")
         print(f"   Будет использован '{impersonate}' (передаётся напрямую в curl_cffi)")
@@ -294,7 +294,6 @@ async def _do_curl_cffi(client_pool: HTTPClientPool, url: str, enable_http3: boo
         res["status"], res["details"] = classify_error(e)
         # Если ошибка связана с HTTP/3, пробуем без него
         if enable_http3 and "http3" in str(e).lower():
-            # Рекурсивно пробуем без HTTP/3
             return await _do_curl_cffi(client_pool, url, enable_http3=False)
     
     return res
@@ -377,7 +376,7 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
     verify_ssl = args.verify_ssl or network.get("verify_ssl", False)
     use_impersonate = not args.no_impersonate and pipeline.get("use_impersonate", True) and USE_CURL_CFFI
     http_fallback = args.http_fallback if args.http_fallback is not None else pipeline.get("http_fallback", True)
-    enable_http3 = pipeline.get("enable_http3", True)  # HTTP/3 по умолчанию включён
+    enable_http3 = args.enable_http3 if hasattr(args, 'enable_http3') else pipeline.get("enable_http3", True)
     retriable_statuses = set(get_config_value("error_classification", "retriable_statuses", default=["TIMEOUT", "PORT_BLOCK", "SSL_ERR", "TLS_ERR", "UNKNOWN", "RST"]))
     show_progress_every = logging_conf.get("show_progress_every", 100)
     verbose = not (args.quiet or logging_conf.get("quiet", False))
@@ -464,7 +463,7 @@ async def run_checker(domains: List[str], use_custom_dns: bool, dns_servers: lis
                 results[res['domain']] = res
                 
                 if verbose:
-                    icon = ICONS.get(res['status'], "❓")
+                    icon = ICONS.get(res['status'], "❌")
                     print(f"[{i}/{len(http_domains)}] {icon} {res['domain']:<40} {res['status']:<10} {res.get('method','?'):<4} ({res.get('pipeline_step','?')}) {res['details']}")
                 
                 if not verbose and i % show_progress_every == 0:
@@ -590,31 +589,26 @@ async def main():
     # Запускаем проверку
     results = await run_checker(domains, use_dns, args.dns or [], args)
     
-    # Статистика
-    ok_domains = [d for d, r in results.items() if r.get('status') == 'OK']
-    http_ok = [d for d, r in results.items() if r.get('status') == 'OK' and 'H1.' in r.get('method', '')]
+    # Статистика и сохранение
+    alive_domains = [d for d, r in results.items() if r.get('status') in ('OK', 'HTTP_ERR')]
     
-    print(f"\n✅ Успешных: {len(ok_domains)} (из них через HTTP/1.x: {len(http_ok)})")
-    print(f"❌ Неудачных: {len(domains) - len(ok_domains)}")
+    print(f"\n✅ Успешных: {len(alive_domains)}")
     
-    # Сохраняем результаты
-    if ok_domains:
+    if alive_domains:
         operators = get_config_value("operators", default={"1": "Default"})
         op = select_operator(operators)
         out_dir = paths.get("output_directory", "build/domains_checked")
-        save_whitelist(ok_domains, op, out_dir)
-    else:
-        print("\n⚠️ Нет успешных доменов для сохранения")
+        save_whitelist(alive_domains, op, out_dir)
     
     # Детальная статистика по статусам
-    print("\n📊 Статистика по статусам:")
+    print("\n📊 Статистика:")
     stats = {}
     for r in results.values():
         status = r.get('status', 'UNKNOWN')
         stats[status] = stats.get(status, 0) + 1
     
     for status, count in sorted(stats.items(), key=lambda x: -x[1]):
-        icon = ICONS.get(status, "❓")
+        icon = ICONS.get(status, "❌")
         print(f"  {icon} {status}: {count}")
     
     # Дополнительная диагностика
@@ -630,8 +624,8 @@ async def main():
     
     if SHUTDOWN_REQUESTED:
         print("\n⚠️  Проверка была прервана досрочно")
-        if ok_domains:
-            print(f"   Но {len(ok_domains)} доменов уже проверено и сохранено")
+        if alive_domains:
+            print(f"   Но {len(alive_domains)} доменов уже проверено и сохранено")
 
 if __name__ == "__main__":
     try:
