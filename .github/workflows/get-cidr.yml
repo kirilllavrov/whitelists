@@ -3,7 +3,7 @@ name: Get CIDR List
 on:
   schedule:
     # Запуск каждый понедельник в 03:00 UTC
-    - cron: '0 3 * * 1'
+    - cron: '0 0 * * *'
   workflow_dispatch:  # Возможность ручного запуска
 
 jobs:
@@ -42,17 +42,8 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add src/IPs/CIDR-ru.txt src/IPs/update_info.txt
           git commit -m "chore: update CIDR list from roscomvpn-geoip
 
           - Source: https://github.com/hydraponique/roscomvpn-geoip
           - Updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           git push
-      
-      - name: Log update status
-        run: |
-          echo "=========================================="
-          echo "CIDR update completed"
-          echo "File: src/IPs/CIDR-ru.txt"
-          echo "Lines: $(wc -l < src/IPs/CIDR-ru.txt)"
-          echo "=========================================="
