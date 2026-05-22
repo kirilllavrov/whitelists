@@ -20,7 +20,7 @@
     "stats_interval": 10,
     "checkpoint_interval": 1000,
     "max_ips_in_memory": 100000,
-    "cidr_max_checks": 10
+    "cidr_max_checks": 40
   },
   
   "output": {

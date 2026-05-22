@@ -421,13 +421,13 @@ def process_cidr_file(filepath, results_dir, checkpoint_state: dict):
     
     return total_found
 
-def check_cidr_parallel(cidr_str, max_checks, timeout=PING_TIMEOUT):
+def check_cidr_parallel(cidr_str, max_checks_per_batch=40, timeout=PING_TIMEOUT):
     """
-    Быстрая параллельная проверка CIDR: проверяем первые N IP одновременно.
+    Параллельная проверка CIDR порциями: проверяем по N IP, пока не найдём живой.
     
     Args:
-        cidr_str: CIDR сеть (например, "2.26.8.0/24")
-        max_checks: Количество первых IP для параллельной проверки
+        cidr_str: CIDR сеть (например, "2.57.186.0/23")
+        max_checks_per_batch: Количество IP для проверки за один раз
         timeout: Таймаут пинга
     
     Returns:
@@ -440,33 +440,39 @@ def check_cidr_parallel(cidr_str, max_checks, timeout=PING_TIMEOUT):
         if not hosts:
             return False, None
         
-        check_count = min(max_checks, len(hosts))
-        logger.info(f"   Проверка CIDR {cidr_str} (первые {check_count} из {len(hosts)} IP)")
+        total_hosts = len(hosts)
+        logger.info(f"   Проверка CIDR {cidr_str} (всего IP: {total_hosts})")
         
-        # Берём первые IP для параллельной проверки
-        check_ips = [str(hosts[i]) for i in range(check_count)]
-        
-        # Параллельный пинг всех выбранных IP
-        with ThreadPoolExecutor(max_workers=check_count) as executor:
-            futures = {executor.submit(ping_ip, ip): ip for ip in check_ips}
+        # Проверяем порциями по max_checks_per_batch
+        for offset in range(0, total_hosts, max_checks_per_batch):
+            if SHUTDOWN_REQUESTED.is_set():
+                return False, None
             
-            # Ждём первый успешный результат
-            for future in as_completed(futures):
-                if SHUTDOWN_REQUESTED.is_set():
-                    return False, None
-                ip, is_alive = future.result()
-                if is_alive:
-                    logger.info(f"   ✅ Найден живой IP: {ip}")
-                    return True, ip
+            batch_end = min(offset + max_checks_per_batch, total_hosts)
+            batch_ips = [str(hosts[i]) for i in range(offset, batch_end)]
+            
+            logger.info(f"      Проверка IP {offset+1}-{batch_end} из {total_hosts} ({len(batch_ips)} IP)")
+            
+            # Параллельный пинг всех IP в текущей порции
+            with ThreadPoolExecutor(max_workers=len(batch_ips)) as executor:
+                futures = {executor.submit(ping_ip, ip): ip for ip in batch_ips}
+                
+                for future in as_completed(futures):
+                    if SHUTDOWN_REQUESTED.is_set():
+                        return False, None
+                    ip, is_alive = future.result()
+                    if is_alive:
+                        logger.info(f"   ✅ Найден живой IP: {ip} (в порции {offset+1}-{batch_end})")
+                        return True, ip
         
-        logger.info(f"   ❌ Живых IP не найдено (первые {check_count})")
+        logger.info(f"   ❌ Живых IP не найдено (проверено все {total_hosts} IP)")
         return False, None
     except Exception as e:
         logger.error(f"Ошибка проверки CIDR {cidr_str}: {e}")
         return False, None
 
-def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_checks: int):
-    """Быстрая обработка CIDR файла (параллельная проверка до первого живого IP)"""
+def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_checks_per_batch: int):
+    """Быстрая обработка CIDR файла (параллельная проверка порциями до первого живого IP)"""
     logger.info(f"\n📄 Быстрая обработка CIDR файла: {os.path.basename(filepath)}")
     
     try:
@@ -505,8 +511,8 @@ def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_ch
         
         logger.info(f"\n🌐 Обработка CIDR {i+1}/{len(cidrs)}: {cidr}")
         
-        # Проверяем подсеть параллельно
-        is_available, alive_ip = check_cidr_parallel(cidr, max_checks)
+        # Проверяем подсеть порциями
+        is_available, alive_ip = check_cidr_parallel(cidr, max_checks_per_batch)
         
         if is_available:
             with FILE_LOCK:
