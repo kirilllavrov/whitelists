@@ -41,7 +41,9 @@ whitelists/
 │   ├── domains/                # Списки доменов по категориям
 │   └── IPs/                    # Списки IP/CIDR для проверки
 ├── configs/
-│   └── minimal-whitelist.list  # Обязательные домены
+│   ├── minimal-whitelist.list  # Обязательные домены
+│   ├── check-domains.json      # Основной конфиг для check-domains.py
+│   └── check_ips.json          # Основной конфиг для check_ips.py
 ├── build/                      # Результаты проверок (создаётся автоматически)
 │   ├── domains_checked/        # Whitelist'ы по операторам
 │   └── IP_checked/             # Доступные IP-адреса
