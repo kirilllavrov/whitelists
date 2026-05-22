@@ -1,0 +1,108 @@
+name: Update CIDR Whitelist
+
+on:
+  schedule:
+    # Запуск каждое воскресенье в 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      cidr_checks:
+        description: 'Количество IP для проверки в подсети'
+        required: false
+        default: '500'
+        type: choice
+        options:
+          - '100'
+          - '500'
+          - '1000'
+      source_url:
+        description: 'URL файла с CIDR (опционально)'
+        required: false
+        default: 'https://raw.githubusercontent.com/hydraponique/roscomvpn-geoip/refs/heads/master/release/text/direct.txt'
+        type: string
+
+jobs:
+  update-cidr:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install curl_cffi httpx aiodns tqdm
+          sudo apt-get update
+          sudo apt-get install -y iputils-ping
+      
+      - name: Download CIDR file
+        run: |
+          mkdir -p src/IPs
+          URL="${{ github.event.inputs.source_url || 'https://raw.githubusercontent.com/hydraponique/roscomvpn-geoip/refs/heads/master/release/text/direct.txt' }}"
+          echo "📥 Загрузка из: $URL"
+          curl -L -o src/IPs/direct.txt "$URL"
+          echo "📊 Строк в файле: $(wc -l < src/IPs/direct.txt)"
+          echo "📝 Первые 20 строк:"
+          head -20 src/IPs/direct.txt
+      
+      - name: Run CIDR scanner
+        run: |
+          cd tools
+          CHECKS="${{ github.event.inputs.cidr_checks || '500' }}"
+          echo "🔍 Запуск проверки CIDR с параметром --cidr-checks $CHECKS"
+          python check_ips.py --cidr --cidr-checks $CHECKS
+      
+      - name: Check results
+        run: |
+          echo "📊 Результаты проверки:"
+          if [ -f build/IP_checked/CIDR-whitelist.txt ]; then
+            COUNT=$(wc -l < build/IP_checked/CIDR-whitelist.txt)
+            echo "✅ Найдено доступных подсетей: $COUNT"
+            echo "📝 Первые 20 подсетей:"
+            head -20 build/IP_checked/CIDR-whitelist.txt
+          else
+            echo "❌ Файл результатов не найден!"
+            exit 1
+          fi
+      
+      - name: Copy result to src/IPs
+        run: |
+          if [ -f build/IP_checked/CIDR-whitelist.txt ]; then
+            cp build/IP_checked/CIDR-whitelist.txt src/IPs/CIDR-ru.txt
+            echo "✅ Файл скопирован в src/IPs/CIDR-ru.txt"
+            echo "📊 Итоговое количество подсетей: $(wc -l < src/IPs/CIDR-ru.txt)"
+          else
+            echo "❌ Нет результатов для копирования"
+            exit 1
+          fi
+      
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          if git diff --quiet src/IPs/CIDR-ru.txt; then
+            echo "📝 Файл CIDR-ru.txt не изменился"
+          else
+            echo "📝 Файл CIDR-ru.txt изменился, создаём коммит"
+            git add src/IPs/CIDR-ru.txt
+            COMMIT_MSG="🤖 Автоматическое обновление CIDR-whitelist"
+            git commit -m "$COMMIT_MSG" -m "Источник: ${{ github.event.inputs.source_url || 'direct.txt (по умолчанию)' }}" -m "Проверено: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" -m "Количество подсетей: $(wc -l < src/IPs/CIDR-ru.txt)"
+            git push
+          fi
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cidr-whitelist
+          path: |
+            build/IP_checked/CIDR-whitelist.txt
+            src/IPs/CIDR-ru.txt
+            scan.log
+          retention-days: 7
