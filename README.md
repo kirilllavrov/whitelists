@@ -413,9 +413,9 @@ yandex.ru
 
 | Переменная | Описание | По умолчанию |
 |------------|--------------|--------------------------------------|
-| `INPUT_PATTERN` | Шаблон файлов для объединения | ../build/domains_checked/*.txt |
-| `THRESHOLD_PERCENT` | Порог встречаемости (%) | 75.0 |
-| `MANDATORY_FILE` | Файл обязательных доменов | ../configs/minimal-whitelist.list |
+| INPUT_PATTERN | Шаблон файлов для объединения | ../build/domains_checked/*.txt |
+| THRESHOLD_PERCENT | Порог встречаемости (%) | 75.0 |
+| MANDATORY_FILE | Файл обязательных доменов | ../configs/minimal-whitelist.list |
 
 ---
 
