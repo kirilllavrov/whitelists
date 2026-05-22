@@ -74,12 +74,14 @@ whitelists/
 ### 1. Скачивание репозитория
 
 Клонируйте репозиторий:
+
 ```bash
 git clone https://github.com/kirilllavrov/whitelists.git
 cd whitelists
 ```
 
 Или скачайте ZIP-архив и распакуйте:
+
 ```bash
 wget https://github.com/kirilllavrov/whitelists/archive/refs/heads/main.zip
 unzip main.zip
@@ -153,37 +155,43 @@ python3 check-domains.py -q
 
 ```bash
 cd tools
+```
 
-# Сначала создайте директорию src/IPs и поместите туда файлы с IP/CIDR
+Сначала создайте директорию src/IPs и поместите туда файлы с IP/CIDR
+
+```bash
 mkdir -p ../src/IPs
-# Поместите файлы .txt с IP или CIDR в ../src/IPs/
+```
 
-# Запуск проверки
+Запуск проверки:
+
+```bash
 python3 check_ips.py
+```
 
-# Режим проверки подсетей (быстрая проверка до первого живого IP)
+Режим проверки подсетей (быстрая проверка до первого живого IP):
+
+```bash
 python3 check_ips.py --cidr
+```
 
-# Продолжение прерванной проверки
+Продолжение прерванной проверки:
+
+```bash
 python3 check_ips.py --resume
 ```
 
-**Настройки** (редактируются в начале скрипта `check_ips.py` или через конфиг `configs/check_ips.json`):
-- `NUM_THREADS` — количество потоков (по умолчанию 50)
-- `PING_TIMEOUT` — таймаут ping в секундах (по умолчанию 3)
-- `MAX_QUEUE_SIZE` — размер очереди задач (по умолчанию 5000)
-- `CIDR_MAX_CHECKS` — количество IP для проверки в режиме --cidr (по умолчанию 10)
+**Настройки**
+
+Редактируются через конфиг `configs/check_ips.json`
 
 **Аргументы командной строки:**
+
 - `-q, --quiet` — тихий режим (вывод только в scan.log)
 - `--resume` — продолжить сканирование с места обрыва
 - `--reset` — сбросить чекпоинт и начать заново
 - `--cidr` — режим проверки подсетей (проверяет первые N IP параллельно)
 - `--cidr-checks N` — количество первых IP для проверки в режиме --cidr
-
-**Результат:**
-- Доступные IP сохраняются в `../build/IP_checked/available_ips_from_<FILENAME>.txt`
-- Автоматически агрегируются в CIDR-блоки
 
 ### 5. Консолидация результатов
 
@@ -246,8 +254,11 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 ```
 
-# Если возникла ошибка выполнения скриптов, выполните в PowerShell от имени администратора:
-# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+### Если возникла ошибка выполнения скриптов, выполните в PowerShell от имени администратора:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
 
 Установите зависимости:
 
@@ -302,6 +313,7 @@ python check_ips.py
 ```
 
 **Важно:** В Windows требуется разрешение на отправку ICMP-запросов (ping). Если ping блокируется брандмауэром:
+
 1. Откройте «Брандмауэр Защитника Windows»
 2. Разрешите «Запросы эха ICMP (ICMP Echo Request)»
 3. Или запустите скрипт от имени администратора
@@ -329,6 +341,7 @@ python merged.py
 | ⚠️ HTTP_ERR  | Ошибка HTTP (4xx/5xx)    | Сервер работает, это НЕ блокировка |
 | 🚫 UNREACH   | Хост недоступен          | Проверить маршрут                  |
 | ❓ UNKNOWN   | Неизвестная ошибка       | Требуется анализ                   |
+
 ### Форматы файлов
 
 **Входные файлы доменов** (`src/domains/`):
@@ -373,6 +386,7 @@ yandex.ru
 | -q, --quiet	| Тихий режим (только прогресс)	| False |
 | -e, --exclude	| Исключить категорию (можно多次)	| [] |
 | --dns	| Свои DNS серверы	| системные DNS |
+| --no-http3 | Отключить HTTP/3 (по умолчанию включён) | False |
 | --verify-ssl	| Проверять SSL сертификаты	| False |
 | --jitter	| Случайная задержка (сек)	| 0.1 |
 | --retries	| Количество повторов при ошибках	| 2 |
@@ -380,11 +394,8 @@ yandex.ru
 | --no-http-fallback	| Отключить HTTP (порт 80)	| False |
 | --show-config	| Показать конфигурацию и выйти	| — |
 | --show-fingerprints	| Показать отпечатки и выйти	| — |
+
 ### check_ips.py
-
-
-| `--no-http3` | Отключить HTTP/3 (по умолчанию включён) | False |
-
 
 Настроить скрипт можно с помощью config/check_ips.json или аргументов командной строки:
 
@@ -401,12 +412,6 @@ yandex.ru
 | `--cidr` | `False` | Режим проверки подсетей (проверяет первые N IP параллельно) |
 
 | `--cidr-checks N` | из конфига (10) | Количество первых IP для проверки в режиме --cidr |
-
-| `NUM_THREADS` | 50 | Количество потоков для ping |
-
-| `PING_TIMEOUT` | 3 | Таймаут ping в секундах |
-
-| `MAX_QUEUE_SIZE` | 5000 | Размер очереди задач |
 
 ### merged.py
 
