@@ -9,6 +9,8 @@
   
 - Режим --cidr: проверка подсетей до первого живого IP (быстро, параллельно)
   Результат: build/IP_checked/CIDR-whitelist.txt
+
+Конфигурация: configs/check_ips.json
 """
 import subprocess
 import sys
@@ -23,21 +25,77 @@ import threading
 import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import time
+from pathlib import Path
 
-# ================= КОНФИГУРАЦИЯ =================
-INPUT_DIRECTORY = "../src/IPs"
-RESULTS_DIR = "../build/IP_checked"
-CHECKPOINT_FILE = "scan_checkpoint.json"
-LOG_FILE = "scan.log"
-NUM_THREADS = 50
-MAX_QUEUE_SIZE = 5000
-PING_TIMEOUT = 3
-MAX_IPS_PER_CIDR = 500000
-STATS_INTERVAL = 10
-CHECKPOINT_INTERVAL = 1000
-MAX_IPS_IN_MEMORY = 100000
-CIDR_MAX_CHECKS = 10          # Количество первых IP для параллельной проверки (по умолчанию)
+# ================= ЗАГРУЗКА КОНФИГУРАЦИИ =================
+SCRIPT_DIR = Path(__file__).parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+CONFIG_DIR = PROJECT_ROOT / "configs"
+CONFIG_FILE = CONFIG_DIR / "check_ips.json"
+
+CONFIG = None
+
+def load_config() -> dict:
+    """Загружает конфигурацию из JSON файла."""
+    if not CONFIG_FILE.exists():
+        print(f"❌ Файл конфигурации не найден: {CONFIG_FILE}")
+        print(f"📁 Создайте файл configs/check_ips.json с необходимыми настройками")
+        sys.exit(1)
+    
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"❌ Ошибка загрузки конфига: {e}")
+        sys.exit(1)
+
+def get_config_value(*keys, default=None):
+    """Безопасное получение значения из конфига."""
+    current = CONFIG
+    for key in keys:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            return default
+        if current is None:
+            return default
+    return current
+
+# Загружаем конфиг
+CONFIG = load_config()
+
+# ================= КОНФИГУРАЦИОННЫЕ ПЕРЕМЕННЫЕ =================
+INPUT_DIRECTORY = get_config_value("paths", "input_directory")
+RESULTS_DIR = get_config_value("paths", "results_directory")
+CHECKPOINT_FILE = get_config_value("paths", "checkpoint_file")
+LOG_FILE = get_config_value("paths", "log_file")
+
+NUM_THREADS = get_config_value("network", "num_threads")
+MAX_QUEUE_SIZE = get_config_value("network", "max_queue_size")
+PING_TIMEOUT = get_config_value("network", "ping_timeout")
+MAX_IPS_PER_CIDR = get_config_value("network", "max_ips_per_cidr")
+
+STATS_INTERVAL = get_config_value("scan", "stats_interval")
+CHECKPOINT_INTERVAL = get_config_value("scan", "checkpoint_interval")
+MAX_IPS_IN_MEMORY = get_config_value("scan", "max_ips_in_memory")
+CIDR_MAX_CHECKS = get_config_value("scan", "cidr_max_checks")
+
+IP_WHITELIST_FILE = get_config_value("output", "ip_whitelist")
+CIDR_WHITELIST_FILE = get_config_value("output", "cidr_whitelist")
 # =================================================
+
+# Проверка обязательных параметров
+required_params = [
+    INPUT_DIRECTORY, RESULTS_DIR, CHECKPOINT_FILE, LOG_FILE,
+    NUM_THREADS, MAX_QUEUE_SIZE, PING_TIMEOUT, MAX_IPS_PER_CIDR,
+    STATS_INTERVAL, CHECKPOINT_INTERVAL, MAX_IPS_IN_MEMORY, CIDR_MAX_CHECKS,
+    IP_WHITELIST_FILE, CIDR_WHITELIST_FILE
+]
+
+if any(p is None for p in required_params):
+    print("❌ Ошибка: отсутствуют обязательные параметры в конфигурационном файле")
+    print("📁 Проверьте configs/check_ips.json")
+    sys.exit(1)
 
 logger = logging.getLogger("ip_scanner")
 logger.setLevel(logging.DEBUG)
@@ -215,9 +273,7 @@ def aggregate_ips_to_cidr(input_file, output_file):
 
 def process_stream(ip_generator, results_dir, checkpoint_state: dict):
     """Основная обработка потока IP адресов (для обычного режима)"""
-    # Единый файл для всех результатов в обычном режиме
-    result_filename = "IP-whitelist.txt"
-    result_path = os.path.join(results_dir, result_filename)
+    result_path = os.path.join(results_dir, IP_WHITELIST_FILE)
     temp_path = result_path + ".tmp"
     
     existing_ips = set()
@@ -428,8 +484,7 @@ def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_ch
     logger.info(f"📋 Найдено CIDR сетей: {len(cidrs)}")
     
     # Единый файл для всех результатов в режиме --cidr
-    result_filename = "CIDR-whitelist.txt"
-    result_path = os.path.join(results_dir, result_filename)
+    result_path = os.path.join(results_dir, CIDR_WHITELIST_FILE)
     temp_path = result_path + ".tmp"
     
     # Загружаем уже обработанные CIDR (для resume)
@@ -578,6 +633,7 @@ def main():
         logger.info(f"⚙️ CIDR проверка: {args.cidr_checks} первых IP")
     logger.info(f"⚙️ Настройки: потоки={NUM_THREADS}, очередь={MAX_QUEUE_SIZE}, "
                f"таймаут={PING_TIMEOUT}с, чекпоинт={CHECKPOINT_INTERVAL}")
+    logger.info(f"⚙️ Конфиг: {CONFIG_FILE}")
     logger.info("="*60)
     
     if not os.path.exists(INPUT_DIRECTORY):

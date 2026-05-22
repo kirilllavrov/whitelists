@@ -1,0 +1,30 @@
+{
+  "comment": "Конфигурация для check_ips.py - сканер доступных IP",
+  "version": "1.0",
+  
+  "paths": {
+    "input_directory": "../src/IPs",
+    "results_directory": "../build/IP_checked",
+    "checkpoint_file": "scan_checkpoint.json",
+    "log_file": "scan.log"
+  },
+  
+  "network": {
+    "num_threads": 50,
+    "max_queue_size": 5000,
+    "ping_timeout": 3,
+    "max_ips_per_cidr": 500000
+  },
+  
+  "scan": {
+    "stats_interval": 10,
+    "checkpoint_interval": 1000,
+    "max_ips_in_memory": 100000,
+    "cidr_max_checks": 10
+  },
+  
+  "output": {
+    "ip_whitelist": "IP-whitelist.txt",
+    "cidr_whitelist": "CIDR-whitelist.txt"
+  }
+}
