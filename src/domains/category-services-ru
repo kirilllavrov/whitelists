@@ -56,6 +56,10 @@ dmclk.ru
 # Evotor
 evotor.ru
 
+# F6
+f6.ru
+facct.ru
+
 # Grand service express
 grandtrain.ru
 
@@ -69,16 +73,27 @@ gismeteo.st
 # GPMDI
 gpmdi.ru
 
+# АЗС Газпромнефть
+gpnbonus.ru
+
 # Headhunter
 hh.ru
 
 # Система кадрового электронного документооборота HRlink
 hr-link.ru
 
+# ITrust
+iitrust.ru
+
 # Jivo
 jivo.ru
 jivochat.com
 jivosite.com
+
+# Kaspersky
+kaspersky-labs.com
+kaspersky.com
+kaspersky.ru
 
 # kodeks
 kodeks.ru
@@ -97,8 +112,18 @@ mail.ru
 # Memealerts
 memealerts.com
 
+# Mindbox
+mindbox.ru
+
+# Мой Газ
+xn--80afnfom.xn--80ahmohdapg.xn--80asehdb
+xn--80asg7a0b.xn--80ahmohdapg.xn--80asehdb
+
 # Нет монет
 netmonet.co
+
+# НЭСК
+nesk.ru
 
 # Право.ру
 pravo.ru
@@ -140,6 +165,11 @@ targetads.io
 
 # Taxi Maxim
 taximaxim.ru
+taxsee.ru
+
+# Tilda
+tilda.cc
+tildacdn.com
 
 # Tensor
 tensor.ru
@@ -173,6 +203,7 @@ rostaxi.org
 webvisor.com
 ya.ru
 yandex-images.clstorage.net
+yandex-net.ru
 yandex-team.ru
 yandex.aero
 yandex.az
@@ -201,13 +232,16 @@ yandex.tj
 yandex.tm
 yandex.uz
 yandexadexchange.net
+yandexcloud.net
+yandexcom.net
 yastat.net
 yastatic-net.ru
 yastatic.net
-yandex-net.ru
 
 # Stories feed in the mobile app
 inappstory.ru
+inappstory.com
+inappdb.ru
 
 # Weather service
 yandex-pogoda.static-storage.net

@@ -8,6 +8,9 @@ nspk.ru
 alfabank.ru
 alfabank.st
 
+# Forabank
+forabank.ru
+
 # GazpromBank
 gazprombank.ru
 gpb.ru
@@ -26,6 +29,9 @@ rosbank.ru
 # RUSSIA Bank
 abr.ru
 
+# Raiffeisen Bank
+raiffeisen.ru
+
 # Russian Agricultural Bank
 rshb.ru
 
@@ -35,10 +41,14 @@ sberbank.com
 sberbank.ru
 
 # T-Bank (Tinkoff)
-t-bank-app.su
 cdn-tinkoff.ru
+t-bank-app.ru
+t-bank-app.su
+t-static.ru
 tbank-online.com
 tbank.ru
+tinkoff.ru
+tmiaf.ru
 
 # Tochka bank
 tochka-tech.com
@@ -46,3 +56,6 @@ tochka.com
 
 # VTB Bank
 www.vtb.ru
+
+# ЮMoney
+yoomoney.ru
