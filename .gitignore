@@ -24,4 +24,4 @@ __pycache__/
 .codebase-memory/
 .codebase-memory/status.json
 data/
-.codebase-memory/status.json
+.codebase-memory
