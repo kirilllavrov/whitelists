@@ -21,7 +21,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 *.egg
-.codebase-memory
+.codebase-memory/
 .codebase-memory/status.json
 data/
 .codebase-memory/status.json
