@@ -26,6 +26,8 @@ import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import time
 from pathlib import Path
+from itertools import islice
+from typing import Optional, cast
 
 # ================= ЗАГРУЗКА КОНФИГУРАЦИИ =================
 SCRIPT_DIR = Path(__file__).parent
@@ -61,27 +63,42 @@ def get_config_value(*keys, default=None):
             return default
     return current
 
+def _resolve_path(value):
+    """Приводит путь к абсолютному относительно каталога скрипта (tools/).
+
+    Позволяет запускать скрипт из любой рабочей директории, а не только из tools/.
+    """
+    if value is None:
+        return None
+    p = Path(value)
+    if not p.is_absolute():
+        p = SCRIPT_DIR / p
+    return str(p.resolve())
+
 # Загружаем конфиг
 CONFIG = load_config()
 
 # ================= КОНФИГУРАЦИОННЫЕ ПЕРЕМЕННЫЕ =================
-INPUT_DIRECTORY = get_config_value("paths", "input_directory")
-RESULTS_DIR = get_config_value("paths", "results_directory")
-CHECKPOINT_FILE = get_config_value("paths", "checkpoint_file")
-LOG_FILE = get_config_value("paths", "log_file")
+# Пути резолвим относительно tools/, чтобы не зависеть от рабочей директории.
+# cast() нужен для статического анализа: отсутствие ключа в конфиге ловится
+# проверкой required_params ниже (скрипт завершится до использования значения).
+INPUT_DIRECTORY: str = cast(str, _resolve_path(get_config_value("paths", "input_directory")))
+RESULTS_DIR: str = cast(str, _resolve_path(get_config_value("paths", "results_directory")))
+CHECKPOINT_FILE: str = cast(str, _resolve_path(get_config_value("paths", "checkpoint_file")))
+LOG_FILE: str = cast(str, _resolve_path(get_config_value("paths", "log_file")))
 
-NUM_THREADS = get_config_value("network", "num_threads")
-MAX_QUEUE_SIZE = get_config_value("network", "max_queue_size")
-PING_TIMEOUT = get_config_value("network", "ping_timeout")
-MAX_IPS_PER_CIDR = get_config_value("network", "max_ips_per_cidr")
+NUM_THREADS: int = cast(int, get_config_value("network", "num_threads"))
+MAX_QUEUE_SIZE: int = cast(int, get_config_value("network", "max_queue_size"))
+PING_TIMEOUT: int = cast(int, get_config_value("network", "ping_timeout"))
+MAX_IPS_PER_CIDR: int = cast(int, get_config_value("network", "max_ips_per_cidr"))
 
-STATS_INTERVAL = get_config_value("scan", "stats_interval")
-CHECKPOINT_INTERVAL = get_config_value("scan", "checkpoint_interval")
-MAX_IPS_IN_MEMORY = get_config_value("scan", "max_ips_in_memory")
-CIDR_MAX_CHECKS = get_config_value("scan", "cidr_max_checks")
+STATS_INTERVAL: int = cast(int, get_config_value("scan", "stats_interval"))
+CHECKPOINT_INTERVAL: int = cast(int, get_config_value("scan", "checkpoint_interval"))
+MAX_IPS_IN_MEMORY: int = cast(int, get_config_value("scan", "max_ips_in_memory"))
+CIDR_MAX_CHECKS: int = cast(int, get_config_value("scan", "cidr_max_checks"))
 
-IP_WHITELIST_FILE = get_config_value("output", "ip_whitelist")
-CIDR_WHITELIST_FILE = get_config_value("output", "cidr_whitelist")
+IP_WHITELIST_FILE: str = cast(str, get_config_value("output", "ip_whitelist"))
+CIDR_WHITELIST_FILE: str = cast(str, get_config_value("output", "cidr_whitelist"))
 # =================================================
 
 # Проверка обязательных параметров
@@ -144,9 +161,13 @@ def load_checkpoint() -> dict:
         "ip_offset": 0
     }
 
-def save_checkpoint(state: dict):
-    """Атомарное сохранение чекпоинта"""
-    if SHUTDOWN_REQUESTED.is_set():
+def save_checkpoint(state: dict, force: bool = False):
+    """Атомарное сохранение чекпоинта.
+
+    force=True позволяет сохранить чекпоинт даже при запросе остановки (Ctrl+C),
+    чтобы при возобновлении (--resume) не потерять уже проверенный прогресс.
+    """
+    if SHUTDOWN_REQUESTED.is_set() and not force:
         return
     
     try:
@@ -159,10 +180,10 @@ def save_checkpoint(state: dict):
         logger.error(f"❌ Не удалось сохранить чекпоинт: {e}")
 
 def save_checkpoint_on_exit():
-    """Сохранить чекпоинт при любом завершении"""
-    if CURRENT_STATE and not SHUTDOWN_REQUESTED.is_set():
+    """Сохранить чекпоинт при любом завершении (в т.ч. при Ctrl+C)."""
+    if CURRENT_STATE:
         logger.info("💾 Сохраняю финальный чекпоинт...")
-        save_checkpoint(CURRENT_STATE)
+        save_checkpoint(CURRENT_STATE, force=True)
 
 def signal_handler(signum, frame):
     """Обработчик сигналов прерывания с немедленным сохранением"""
@@ -175,16 +196,14 @@ if hasattr(signal, 'SIGTERM'):
 atexit.register(save_checkpoint_on_exit)
 
 def generate_ips_from_cidr(cidr_str, skip: int = 0):
-    """Генератор IP из CIDR с возможностью пропуска"""
+    """Генератор IP из CIDR с возможностью пропуска (ленивый, без загрузки в память)."""
     try:
         network = ipaddress.ip_network(cidr_str, strict=False)
         host_gen = (str(h) for h in network.hosts())
         
-        for _ in range(skip):
-            try:
-                next(host_gen)
-            except StopIteration:
-                break
+        # Эффективный пропуск первых `skip` адресов (O(1), без поочерёдного next())
+        if skip > 0:
+            host_gen = islice(host_gen, skip, None)
         
         count = 0
         for ip in host_gen:
@@ -199,32 +218,44 @@ def generate_ips_from_cidr(cidr_str, skip: int = 0):
         logger.warning(f"⚠️ Невалидный CIDR: {cidr_str}")
 
 def parse_cidrs_from_content(content):
-    """Извлечение CIDR из текста"""
+    """Извлечение CIDR из текста (с сохранением порядка и дедупликацией)."""
     cidr_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b'
     cidrs = re.findall(cidr_pattern, content)
     valid = []
+    seen = set()
     for c in cidrs:
+        if c in seen:
+            continue
         try:
             ipaddress.ip_network(c, strict=False)
+            seen.add(c)
             valid.append(c)
         except ValueError:
             continue
     return valid
 
-def ping_ip(ip):
-    """Пинг одного IP адреса"""
+def _cidr_sort_key(cidr: str):
+    """Ключ сортировки CIDR в числовом порядке по сети."""
+    try:
+        return ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return ipaddress.ip_network("0.0.0.0/0")
+
+def ping_ip(ip, timeout: Optional[int] = None):
+    """Пинг одного IP адреса."""
+    timeout = PING_TIMEOUT if timeout is None else timeout
     if sys.platform.startswith("win"):
-        cmd = ["ping", "-n", "1", "-w", str(PING_TIMEOUT * 1000), ip]
-        timeout_val = PING_TIMEOUT + 1
+        cmd = ["ping", "-n", "1", "-w", str(timeout * 1000), ip]
+        timeout_val = timeout + 1
     else:
-        cmd = ["ping", "-c", "1", "-W", str(PING_TIMEOUT), ip]
-        timeout_val = PING_TIMEOUT + 1
+        cmd = ["ping", "-c", "1", "-W", str(timeout), ip]
+        timeout_val = timeout + 1
     
     try:
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, 
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=timeout_val)
         return ip, res.returncode == 0
-    except (subprocess.TimeoutExpired, Exception):
+    except Exception:
         return ip, False
 
 def aggregate_ips_to_cidr(input_file, output_file):
@@ -272,9 +303,13 @@ def aggregate_ips_to_cidr(input_file, output_file):
         return False
 
 def process_stream(ip_generator, results_dir, checkpoint_state: dict):
-    """Основная обработка потока IP адресов (для обычного режима)"""
-    result_path = os.path.join(results_dir, IP_WHITELIST_FILE)
-    temp_path = result_path + ".tmp"
+    """Основная обработка потока IP адресов (для обычного режима).
+
+    Результаты копятся в temp-файле; финальная агрегация в CIDR выполняется
+    один раз в конце скана (см. finalize_ip_results) — это убирает повторную
+    агрегацию после каждого CIDR (O(n²)).
+    """
+    temp_path = os.path.join(results_dir, IP_WHITELIST_FILE) + ".tmp"
     
     existing_ips = set()
     if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
@@ -287,6 +322,7 @@ def process_stream(ip_generator, results_dir, checkpoint_state: dict):
             logger.warning(f"⚠️ Не удалось загрузить существующие IP: {e}")
     
     count_found = len(existing_ips)
+    new_found = 0
     count_checked = 0
     last_stats_time = time.time()
     last_checkpoint_save = 0
@@ -323,6 +359,7 @@ def process_stream(ip_generator, results_dir, checkpoint_state: dict):
                                         f_out.write(ip + '\n')
                                         f_out.flush()
                                         count_found += 1
+                                        new_found += 1
                                         existing_ips.add(ip)
                         except Exception as e:
                             logger.debug(f"Ошибка обработки результата: {e}")
@@ -344,31 +381,14 @@ def process_stream(ip_generator, results_dir, checkpoint_state: dict):
                 if now - last_stats_time >= STATS_INTERVAL:
                     elapsed = now - start_time
                     rate = count_checked / elapsed if elapsed > 0 else 0
-                    logger.info(f"📊 Найдено: {count_found} | Проверено: {count_checked} | "
+                    logger.info(f"📊 Новых: {new_found} (всего: {count_found}) | Проверено: {count_checked} | "
                                f"Скорость: {rate:.1f} IP/сек | Очередь: {len(futures)}")
                     last_stats_time = now
             
             checkpoint_state["ip_offset"] = count_checked
             checkpoint_state["found_count"] = count_found
-            save_checkpoint(checkpoint_state)
-    
-    if count_found > 0:
-        logger.info(f"🔄 Финальная агрегация {count_found} IP...")
-        if aggregate_ips_to_cidr(temp_path, result_path):
-            logger.info(f"📂 Финальный результат сохранен: {result_path}")
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-        else:
-            logger.warning(f"⚠️ Агрегация не удалась, сохранен сырой список")
-            if os.path.exists(result_path):
-                os.remove(result_path)
-            os.rename(temp_path, result_path)
-    else:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        logger.info("⚠️ Работоспособных IP не найдено.")
+            # force=True: при Ctrl+C сохраняем актуальный прогресс для --resume
+            save_checkpoint(checkpoint_state, force=True)
     
     return count_found
 
@@ -413,59 +433,59 @@ def process_cidr_file(filepath, results_dir, checkpoint_state: dict):
         found = process_stream(ip_gen(), results_dir, checkpoint_state)
         total_found += found
         
-        if not SHUTDOWN_REQUESTED.is_set():
-            if "file_offsets" not in checkpoint_state:
-                checkpoint_state["file_offsets"] = {}
-            checkpoint_state["file_offsets"][offset_key] = checkpoint_state.get("ip_offset", 0)
-            save_checkpoint(checkpoint_state)
+        if "file_offsets" not in checkpoint_state:
+            checkpoint_state["file_offsets"] = {}
+        checkpoint_state["file_offsets"][offset_key] = checkpoint_state.get("ip_offset", 0)
+        # force=True: сохраняем смещение даже при Ctrl+C
+        save_checkpoint(checkpoint_state, force=True)
     
     return total_found
 
-def check_cidr_parallel(cidr_str, max_checks_per_batch=40, timeout=PING_TIMEOUT):
+def check_cidr_parallel(cidr_str, max_checks_per_batch=40, timeout: Optional[int] = None):
     """
     Параллельная проверка CIDR порциями: проверяем по N IP, пока не найдём живой.
+    Хосты перебираются лениво (без загрузки всей подсети в память).
     
     Args:
         cidr_str: CIDR сеть (например, "2.57.186.0/23")
-        max_checks_per_batch: Количество IP для проверки за один раз
-        timeout: Таймаут пинга
+        max_checks_per_batch: Количество IP, проверяемых за одну порцию
+        timeout: Таймаут пинга (по умолчанию PING_TIMEOUT из конфига)
     
     Returns:
         tuple: (доступна_ли_сеть, первый_живой_IP_или_None)
     """
     try:
         network = ipaddress.ip_network(cidr_str, strict=False)
-        hosts = list(network.hosts())
+        host_iter = iter(network.hosts())
+        # Оценка числа хостов для логов
+        total_hosts = (network.num_addresses - 2) if network.prefixlen < 31 else network.num_addresses
         
-        if not hosts:
-            return False, None
-        
-        total_hosts = len(hosts)
-        logger.info(f"   Проверка CIDR {cidr_str} (всего IP: {total_hosts})")
-        
-        # Проверяем порциями по max_checks_per_batch
-        for offset in range(0, total_hosts, max_checks_per_batch):
+        checked = 0
+        while True:
             if SHUTDOWN_REQUESTED.is_set():
                 return False, None
             
-            batch_end = min(offset + max_checks_per_batch, total_hosts)
-            batch_ips = [str(hosts[i]) for i in range(offset, batch_end)]
+            batch_ips = [str(ip) for ip in islice(host_iter, max_checks_per_batch)]
+            if not batch_ips:
+                break
             
-            logger.info(f"      Проверка IP {offset+1}-{batch_end} из {total_hosts} ({len(batch_ips)} IP)")
+            checked += len(batch_ips)
+            logger.info(f"      Проверка IP {checked - len(batch_ips) + 1}-{checked} "
+                       f"из ~{total_hosts} ({len(batch_ips)} IP)")
             
             # Параллельный пинг всех IP в текущей порции
             with ThreadPoolExecutor(max_workers=len(batch_ips)) as executor:
-                futures = {executor.submit(ping_ip, ip): ip for ip in batch_ips}
+                futures = {executor.submit(ping_ip, ip, timeout): ip for ip in batch_ips}
                 
                 for future in as_completed(futures):
                     if SHUTDOWN_REQUESTED.is_set():
                         return False, None
                     ip, is_alive = future.result()
                     if is_alive:
-                        logger.info(f"   ✅ Найден живой IP: {ip} (в порции {offset+1}-{batch_end})")
+                        logger.info(f"   ✅ Найден живой IP: {ip}")
                         return True, ip
         
-        logger.info(f"   ❌ Живых IP не найдено (проверено все {total_hosts} IP)")
+        logger.info(f"   ❌ Живых IP не найдено (проверено {checked} IP)")
         return False, None
     except Exception as e:
         logger.error(f"Ошибка проверки CIDR {cidr_str}: {e}")
@@ -493,6 +513,16 @@ def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_ch
     result_path = os.path.join(results_dir, CIDR_WHITELIST_FILE)
     temp_path = result_path + ".tmp"
     
+    # Уже найденные CIDR — защита от дублей при повторном запуске
+    existing_cidrs = set()
+    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+        try:
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                existing_cidrs = set(line.strip() for line in f if line.strip())
+            logger.info(f"📊 Загружено {len(existing_cidrs)} уже найденных CIDR")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось загрузить существующие CIDR: {e}")
+    
     # Загружаем уже обработанные CIDR (для resume)
     processed_cidrs = set(checkpoint_state.get("processed_cidrs", []))
     if processed_cidrs:
@@ -504,9 +534,12 @@ def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_ch
         if SHUTDOWN_REQUESTED.is_set():
             break
         
-        # Пропускаем уже обработанные
         if cidr in processed_cidrs:
             logger.info(f"⏭ Пропуск обработанного CIDR: {cidr}")
+            continue
+        
+        if cidr in existing_cidrs:
+            logger.info(f"⏭ CIDR уже в списке: {cidr}")
             continue
         
         logger.info(f"\n🌐 Обработка CIDR {i+1}/{len(cidrs)}: {cidr}")
@@ -518,24 +551,21 @@ def process_cidr_file_fast(filepath, results_dir, checkpoint_state: dict, max_ch
             with FILE_LOCK:
                 with open(temp_path, 'a', encoding='utf-8') as f:
                     f.write(f"{cidr}\n")
+                existing_cidrs.add(cidr)
                 total_found += 1
                 logger.info(f"   ✅ CIDR добавлен в список: {cidr} (живой IP: {alive_ip})")
         else:
             logger.info(f"   ❌ CIDR пропущен: {cidr}")
         
-        # Сохраняем прогресс
+        # Сохраняем прогресс (не отмечаем частично проверенную сеть как готовую)
         if not SHUTDOWN_REQUESTED.is_set():
             processed_cidrs.add(cidr)
             checkpoint_state["processed_cidrs"] = list(processed_cidrs)
             save_checkpoint(checkpoint_state)
     
-    # Финальное сохранение
-    if total_found > 0:
-        import shutil
-        shutil.copy2(temp_path, result_path)
-        logger.info(f"\n📂 Результат сохранен: {result_path} ({total_found} подсетей)")
-    else:
-        logger.info("\n⚠️ Доступных подсетей не найдено")
+    # Финальная запись выполняется один раз в конце скана (finalize_ip_results):
+    # так при нескольких входных файлах результаты накапливаются, а не
+    # перезаписываются результатами последнего файла.
     
     return total_found
 
@@ -578,13 +608,59 @@ def process_ip_list_file(filepath, results_dir, checkpoint_state: dict):
     
     found = process_stream(ip_gen(), results_dir, checkpoint_state)
     
-    if not SHUTDOWN_REQUESTED.is_set():
-        if "file_offsets" not in checkpoint_state:
-            checkpoint_state["file_offsets"] = {}
-        checkpoint_state["file_offsets"][file_key] = checkpoint_state.get("ip_offset", 0)
-        save_checkpoint(checkpoint_state)
+    if "file_offsets" not in checkpoint_state:
+        checkpoint_state["file_offsets"] = {}
+    checkpoint_state["file_offsets"][file_key] = checkpoint_state.get("ip_offset", 0)
+    # force=True: сохраняем смещение даже при Ctrl+C
+    save_checkpoint(checkpoint_state, force=True)
     
     return found
+
+def finalize_ip_results(results_dir, output_file=IP_WHITELIST_FILE, aggregate=True):
+    """Финальное сохранение накопленных результатов (один раз в конце скана).
+
+    Полный режим (aggregate=True): temp содержит IP-адреса → агрегируются в CIDR.
+    Режим --cidr (aggregate=False): temp уже содержит CIDR → дедупликация + сортировка.
+
+    Раньше агрегация/копирование выполнялись после каждого CIDR (и каждого файла),
+    из-за чего при нескольких входных файлах в итоговом файле оставались только
+    результаты последнего файла. Теперь всё копится в общем temp-файле, а финальный
+    результат собирается один раз в конце.
+    """
+    result_path = os.path.join(results_dir, output_file)
+    temp_path = result_path + ".tmp"
+    
+    if not (os.path.exists(temp_path) and os.path.getsize(temp_path) > 0):
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        logger.info("⚠️ Работоспособных IP не найдено.")
+        return
+    
+    if aggregate:
+        logger.info("🔄 Финальная агрегация IP → CIDR...")
+        if aggregate_ips_to_cidr(temp_path, result_path):
+            logger.info(f"📂 Итоговый результат сохранен: {result_path}")
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        else:
+            logger.warning("⚠️ Агрегация не удалась, сохранен сырой список")
+            if os.path.exists(result_path):
+                os.remove(result_path)
+            os.rename(temp_path, result_path)
+    else:
+        import shutil
+        with open(temp_path, 'r', encoding='utf-8') as f:
+            unique = sorted(set(line.strip() for line in f if line.strip()), key=_cidr_sort_key)
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(unique) + '\n')
+        shutil.copy2(temp_path, result_path)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        logger.info(f"📂 Результат сохранен: {result_path} ({len(unique)} подсетей)")
 
 def determine_file_type(filepath):
     """Определение типа файла (CIDR или список IP)"""
@@ -621,7 +697,7 @@ def main():
     parser.add_argument('--cidr', action='store_true', 
                         help='Режим проверки подсетей (до первого живого IP, быстро)')
     parser.add_argument('--cidr-checks', type=int, default=CIDR_MAX_CHECKS,
-                        help=f'Количество первых IP для проверки в режиме --cidr (по умолч. {CIDR_MAX_CHECKS})')
+                        help=f'Размер порции IP, проверяемых параллельно в режиме --cidr (по умолч. {CIDR_MAX_CHECKS})')
     parser.add_argument('--version', action='version', version='IP Scanner v2.0')
     args = parser.parse_args()
     
@@ -636,7 +712,7 @@ def main():
     logger.info(f"🔍 IP SCANNER v2.0")
     logger.info(f"⚙️ Режим: {'CIDR (быстрый)' if args.cidr else 'Полный'}")
     if args.cidr:
-        logger.info(f"⚙️ CIDR проверка: {args.cidr_checks} первых IP")
+        logger.info(f"⚙️ CIDR проверка: порции по {args.cidr_checks} IP (до первого живого)")
     logger.info(f"⚙️ Настройки: потоки={NUM_THREADS}, очередь={MAX_QUEUE_SIZE}, "
                f"таймаут={PING_TIMEOUT}с, чекпоинт={CHECKPOINT_INTERVAL}")
     logger.info(f"⚙️ Конфиг: {CONFIG_FILE}")
@@ -717,6 +793,12 @@ def main():
             logger.error(f"💥 Критическая ошибка при обработке {filename}: {e}")
             logger.exception("Детали ошибки:")
             continue
+    
+    if not SHUTDOWN_REQUESTED.is_set():
+        if args.cidr:
+            finalize_ip_results(RESULTS_DIR, CIDR_WHITELIST_FILE, aggregate=False)
+        else:
+            finalize_ip_results(RESULTS_DIR)
     
     if SHUTDOWN_REQUESTED.is_set():
         logger.info("\n⏸️ Сканирование прервано пользователем")

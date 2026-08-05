@@ -1,0 +1,10 @@
+{
+  "processed_files": [],
+  "file_offsets": {},
+  "processed_cidrs": [
+    "10.5.0.0/30",
+    "10.0.0.0/30"
+  ],
+  "current_file": null,
+  "ip_offset": 0
+}
