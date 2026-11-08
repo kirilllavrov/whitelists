@@ -201,7 +201,8 @@ def main() -> None:
         RELEASE_DIR.mkdir(parents=True, exist_ok=True)
         plat.write_lines(RELEASE_DIR / "whitelist-common.txt", chosen)
         plat.write_lines(RELEASE_DIR / "IP-whitelist-common.txt", sorted(ips))
-        (RELEASE_DIR / "whitelist-common.meta.json").write_text(
+        plat.write_text(
+            RELEASE_DIR / "whitelist-common.meta.json",
             json.dumps({
                 "built_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "phase": args.phase,
@@ -214,7 +215,7 @@ def main() -> None:
                 "domains": len(chosen),
                 "addresses": len(ips),
                 "shared_address_domains": len(flags),
-            }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            }, indent=2, ensure_ascii=False) + "\n")
         print(f"\n💾 release/whitelist-common.txt: {len(chosen)} доменов")
         print(f"💾 release/IP-whitelist-common.txt: {len(ips)} адресов")
 

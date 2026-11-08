@@ -295,8 +295,8 @@ def ensure_operator_in_manifest(operator):
         "sources": [f"runs/{operator}/on/*.txt"],
         "pairs": [f"runs/{operator}/on/*.tsv"],
     }
-    RELEASE_CONFIG.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    plat.write_text(
+        RELEASE_CONFIG, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
     print(f"   оператор «{operator}» добавлен в {RELEASE_CONFIG.relative_to(ROOT)}")
 
 

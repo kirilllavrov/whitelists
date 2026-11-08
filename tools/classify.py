@@ -422,10 +422,8 @@ def write_release(operator: str, data: Dict[str, Any], out_dir: Path) -> None:
     ips = sorted({item["ip"] for domain in allowed
                   for item in domains[domain]["addresses"] if item["state"] == ADR_ALLOWED})
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)
-    (RELEASE_DIR / f"whitelist-{operator}.txt").write_text(
-        "\n".join(allowed) + ("\n" if allowed else ""), encoding="utf-8")
-    (RELEASE_DIR / f"IP-whitelist-{operator}.txt").write_text(
-        "\n".join(ips) + ("\n" if ips else ""), encoding="utf-8")
+    plat.write_lines(RELEASE_DIR / f"whitelist-{operator}.txt", allowed)
+    plat.write_lines(RELEASE_DIR / f"IP-whitelist-{operator}.txt", ips)
     print(f"💾 release/whitelist-{operator}.txt: {len(allowed)} доменов")
     print(f"💾 release/IP-whitelist-{operator}.txt: {len(ips)} адресов")
 
