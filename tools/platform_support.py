@@ -51,6 +51,31 @@ def setup_console() -> None:
             pass
 
 
+# SetThreadExecutionState: держать систему без сна, пока поток не сбросит флаг.
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def keep_awake() -> bool:
+    """Windows: не уходить в сон по таймеру простоя, пока идёт прогон.
+
+    Прогон длится час и больше, а сон по умолчанию — через час без ввода.
+    Во сне телефон-модем отключается и после пробуждения часто не
+    возвращается: остаток прогона идёт по мёртвому каналу. Флаг живёт, пока
+    жив поток, и снимается сам при выходе; прав администратора не нужно.
+    Сон по кнопке и закрытию крышки не отменяет. False — не Windows или
+    вызов не удался.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        return bool(kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED))
+    except (AttributeError, OSError):
+        return False
+
+
 def can_bind_interface() -> bool:
     """Привязка сокета к интерфейсу: Linux и Windows."""
     if IS_WINDOWS:

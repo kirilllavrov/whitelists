@@ -409,6 +409,8 @@ def main():
     operator, mcc_mnc = ask_operator(args.operator)
     operator = slug(operator)
     print(f"\n=== Проверка доменов · оператор: {operator} · фаза: {args.phase} ===")
+    if plat.keep_awake():
+        print("☕ сон Windows по таймеру отключён до конца прогона")
     iface = pick_interface(args.interface)
     channel = check_channel(iface)
 
