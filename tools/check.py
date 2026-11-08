@@ -73,6 +73,21 @@ def confirm_mismatch(iface: str, phase: str, attempts: int = 2,
     return reason
 
 
+def confirm_link_lost(iface: str, attempts: int = 2, pause: float = 5.0) -> bool:
+    """Канал проб не отвечает — подтверждено повторной проверкой.
+
+    Для HTTP-шага это не «режим неизвестен», а негодный результат: домены
+    после обрыва получают UNKNOWN/TIMEOUT, и в runs/ это выглядело бы как
+    фильтрация. Хватает одного ответа, чтобы считать канал живым.
+    """
+    for attempt in range(attempts):
+        if mode_check.probe_mode(iface)["state"] != mode_check.STATE_NO_LINK:
+            return False
+        if attempt + 1 < attempts:
+            time.sleep(pause)
+    return True
+
+
 # Сеть оператора по названию: нужно, чтобы прогон попал в правильную папку runs/.
 NETWORKS = {
     "megafon": "250-02",
@@ -525,6 +540,12 @@ def main():
             http_file = after
         if mode_guard and not INTERRUPTED:
             mode_lost = confirm_mismatch(iface, args.phase)
+            if not mode_lost and http_file and confirm_link_lost(iface):
+                # Пары сняты до HTTP-шага, при живом канале: их сохраняем,
+                # как прогон с --no-http — classify.py это учитывает.
+                print("\n⚠️  канал не отвечает после HTTP-проверки: её результат "
+                      "не сохраняется, наблюдения пар — сохраняются")
+                http_file = None
 
     saved = []
     if mode_lost:

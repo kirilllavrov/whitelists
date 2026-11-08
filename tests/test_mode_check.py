@@ -94,6 +94,22 @@ def test_check_confirms_mismatch(monkeypatch, states, phase, expect_reason):
     assert bool(check.confirm_mismatch("", phase, pause=0)) is expect_reason
 
 
+@pytest.mark.parametrize("states, lost", [
+    (["no_link", "no_link"], True),
+    (["no_link", "on"], False),        # канал вернулся — HTTP-результат годен
+    (["on"], False),
+    (["off"], False),                  # канал жив; смену режима ловит confirm_mismatch
+    (["unclear"], False),
+])
+def test_check_confirms_link_lost(monkeypatch, states, lost):
+    """Компьютер уснул посреди HTTP-шага, телефон после пробуждения не
+    вернулся: 236 доменов получили UNKNOWN, а прогон сохранился как обычный."""
+    sequence = iter(states)
+    monkeypatch.setattr(check.mode_check, "probe_mode",
+                        lambda iface="", timeout=3.0: _result(next(sequence, "on")))
+    assert check.confirm_link_lost("", pause=0) is lost
+
+
 def test_pause_between_chunks_ends_on_shutdown(monkeypatch):
     """После остановки пустые блоки выдерживали паузы по 60 с: выход
     из прогона, остановленного в начале, растягивался на десятки минут."""
