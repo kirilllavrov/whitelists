@@ -651,6 +651,9 @@ class HTTPClientPool:
                 follow_redirects=False,
                 headers=self.s.headers,
                 limits=httpx.Limits(max_keepalive_connections=20),
+                # без явного transport httpx берёт прокси из окружения,
+                # а на Windows — и системный прокси из реестра
+                trust_env=False,
             )
         transport = httpx.AsyncHTTPTransport(verify=self.s.verify_ssl, http2=http2)
         bound = bool(self.s.interface) and HTTPCORE_AVAILABLE and plat.can_bind_interface()
@@ -694,6 +697,10 @@ class HTTPClientPool:
 
     def _new_curl(self, pin: Optional[AddressPin]) -> Optional[Any]:
         options: Dict[Any, Any] = {}
+        if CurlOpt is not None and hasattr(CurlOpt, "NOPROXY"):
+            # libcurl сам читает http_proxy/https_proxy: замер через прокси
+            # проверял бы сеть прокси, а не оператора. «*» — без прокси вообще.
+            options[CurlOpt.NOPROXY] = "*"
         if pin:
             domain, ip = pin
             # CURLOPT_RESOLVE: имя из SNI/Host, соединение — на проверяемый адрес.
@@ -708,6 +715,7 @@ class HTTPClientPool:
                 verify=self.s.verify_ssl,
                 timeout=self.s.timeout_total,
                 allow_redirects=False,
+                trust_env=False,
                 **({"curl_options": options} if options else {}),
                 **extra,
             )

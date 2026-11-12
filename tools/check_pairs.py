@@ -1302,7 +1302,9 @@ async def detect_egress() -> Dict[str, Any]:
         if BIND_INTERFACE:
             return bound_https_get(url, timeout=6)
         request = urllib.request.Request(url, headers={"User-Agent": "curl/8"})
-        with urllib.request.urlopen(request, timeout=6) as response:
+        # без прокси из окружения и реестра Windows: нужен адрес оператора
+        direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with direct.open(request, timeout=6) as response:
             return response.read().decode("utf-8", "replace")
 
     info: Dict[str, Any] = {}

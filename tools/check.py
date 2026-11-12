@@ -238,7 +238,9 @@ def detect_operator(timeout: float = 8.0, iface: str = ""):
             raw = check_pairs.bound_https_get("https://ipinfo.io/json", timeout)
             data = json.loads(raw)
         else:
-            with urllib.request.urlopen("https://ipinfo.io/json", timeout=timeout) as resp:
+            # без прокси: иначе в ответе будет провайдер прокси, а не оператор
+            direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with direct.open("https://ipinfo.io/json", timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
     except Exception:
         return "", ""
