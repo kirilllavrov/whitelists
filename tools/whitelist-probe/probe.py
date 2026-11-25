@@ -15,7 +15,8 @@
   blocked_tls_timeout TCP есть, но TLS-рукопожатие не завершилось (таймаут)
   blocked_dns     DNS вернул заглушку (8.6.112.x, 8.47.69.x, 0.0.0.0, 127.0.0.1)
   refused         соединение отклонено
-  no_dns          A-записей нет
+  no_dns          A-записей нет (NOERROR без адресов или NXDOMAIN)
+  dns_error       DNS не ответил или ответил ошибкой (SERVFAIL, REFUSED)
   error           прочее
 """
 
@@ -58,7 +59,7 @@ SINK_EXACT = {"0.0.0.0", "127.0.0.1", "192.168.8.1"}
 STATUS_ORDER = [
     "allow", "allow_tls", "open_http", "http_redirect", "blocked_portal",
     "blocked_dns", "blocked_tls", "blocked_timeout", "blocked_tls_timeout",
-    "refused", "no_dns", "error",
+    "refused", "no_dns", "dns_error", "error",
 ]
 
 CIDR_RE = re.compile(r"^[0-9a-fA-F:.]+/\d{1,3}$")
@@ -94,38 +95,48 @@ def norm_domain(raw):
     return s
 
 
-def dig_a(domain, resolver, timeout, attempts=4):
-    """До attempts запросов A, до первого непустого ответа.
+def dig_query(domain, resolver, timeout):
+    """Один запрос A. Возвращает (rcode, адреса).
 
-    Заглушки не отсеиваются: их распознаёт probe_tls_only.
+    rcode — ответ сервера (NOERROR, NXDOMAIN, SERVFAIL, REFUSED…) или "",
+    если ответа не было: таймаут, недоступный сервер, сбой dig. Адреса —
+    все A из ответа, включая заглушки: их распознаёт probe_tls_only.
+    +short здесь не годится — он печатает одно и то же и для пустого
+    ответа, и для таймаута.
     """
-    for _ in range(attempts):
-        try:
-            p = subprocess.run(
-                ["dig", "+noedns", "+short", "+time=%d" % timeout, "+tries=1",
-                 "A", domain, "@" + resolver],
-                capture_output=True, text=True, timeout=timeout + 3,
-            )
-            ips = [x for x in p.stdout.split() if is_ipv4(x)]
-            if ips:
-                return sorted(set(ips))
-        except Exception:
-            pass
-        time.sleep(0.4)
-    return []
-
-
-def raw_dig(domain, resolver, timeout):
-    """Возвращает все адреса, включая заглушки, чтобы отличить подмену от пустого ответа."""
     try:
         p = subprocess.run(
-            ["dig", "+noedns", "+short", "+time=%d" % timeout, "+tries=1",
+            ["dig", "+noedns", "+time=%d" % timeout, "+tries=1",
              "A", domain, "@" + resolver],
             capture_output=True, text=True, timeout=timeout + 3,
         )
-        return sorted({x for x in p.stdout.split() if is_ipv4(x)})
     except Exception:
-        return []
+        return "", []
+    m = re.search(r"->>HEADER<<-.*status: ([A-Z]+)", p.stdout)
+    rcode = m.group(1) if m else ""
+    ips = set()
+    for line in p.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 5 and not line.startswith(";") and f[-2] == "A" and is_ipv4(f[-1]):
+            ips.add(f[-1])
+    return rcode, sorted(ips)
+
+
+def resolve_a(domain, resolver, timeout, attempts=4):
+    """До attempts запросов A. Возвращает (rcode, адреса) последнего запроса.
+
+    Повтор — только если адресов нет и сервер не ответил однозначно:
+    первый запрос на мобильном канале часто теряется, а SERVFAIL бывает
+    разовым. NOERROR без адресов и NXDOMAIN — окончательный ответ.
+    """
+    rcode, ips = "", []
+    for i in range(attempts):
+        if i:
+            time.sleep(0.4)
+        rcode, ips = dig_query(domain, resolver, timeout)
+        if ips or rcode in ("NOERROR", "NXDOMAIN"):
+            break
+    return rcode, ips
 
 
 def browser_tls_probe(ip, sni, timeout):
@@ -316,7 +327,8 @@ def tls_round(domain, ips, args, stop_on_allow=False, timeout=None, sni=None):
 
 
 # Итоги, после которых второй проход не нужен: TLS прошёл, DNS ответил
-# однозначно, адресов нет, либо по 80 показан портал оператора.
+# заглушкой, DNS однозначно ответил «адресов нет», либо по 80 показан портал
+# оператора. dns_error сюда не входит: второй проход повторяет домен целиком.
 TERMINAL = ("allow", "allow_tls", "blocked_dns", "no_dns", "blocked_portal")
 
 
@@ -338,20 +350,22 @@ def probe_tls_only(name, kind, args):
     if kind == "ip":
         ips = [name]
     else:
-        raw = raw_dig(name, args.resolver, args.dns_timeout)
-        if not raw:
-            # первый запрос мог потеряться: повторяем до проверки на заглушки,
-            # иначе заглушка из повтора уходит в TLS как обычный адрес
-            raw = dig_a(name, args.resolver, args.dns_timeout)
+        rcode, raw = resolve_a(name, args.resolver, args.dns_timeout)
         if raw and all(any(x.startswith(p) for p in SINK_PREFIXES) or x in SINK_EXACT
                        for x in raw):
             return dict(status="blocked_dns", checked_ip="", ips=" ".join(raw),
                         reason="DNS sinkhole", ms=ms(), tries=1), []
         ips = [x for x in raw if not any(x.startswith(p) for p in SINK_PREFIXES)
                and x not in SINK_EXACT]
-        if not ips:
-            return dict(status="no_dns", checked_ip="", ips="", reason="no A records",
+        if not ips and rcode in ("NOERROR", "NXDOMAIN"):
+            return dict(status="no_dns", checked_ip="", ips="",
+                        reason="NXDOMAIN" if rcode == "NXDOMAIN" else "no A records",
                         ms=ms(), tries=1), []
+        if not ips:
+            # DNS молчал или ответил ошибкой: про домен это ничего не говорит,
+            # второй проход спросит заново
+            return dict(status="dns_error", checked_ip="", ips="",
+                        reason="DNS %s" % (rcode or "timeout"), ms=ms(), tries=1), []
         if args.max_ips > 0:
             ips = ips[: args.max_ips]
 
@@ -390,8 +404,9 @@ def probe_tls_only(name, kind, args):
 def diagnose(name, kind, prev, ips, args):
     """Проход 2: медленные повторы TLS для тех, кто не прошёл первый.
 
-    Портал и DNS уже отсеяны в первом проходе, здесь остаются только
-    неоднозначные отказы. На мобильном канале первый отказ часто оказывается
+    Портал и ответы DNS уже отсеяны в первом проходе, здесь остаются только
+    неоднозначные отказы (dns_error main проверяет заново через
+    probe_tls_only, а не здесь). На мобильном канале первый отказ часто оказывается
     потерей пакета, поэтому таймаут утраивается. Если TLS прошёл — статус
     становится allow, иначе остаётся то, что дал первый проход.
     """
@@ -581,7 +596,11 @@ def main():
         try:
             for j, k in enumerate(need, 1):
                 item, prev, ips = state[k]
-                r = diagnose(item[0], item[1], prev, ips, args)
+                if prev["status"] == "dns_error":
+                    # адресов нет — повторять TLS не с чем, проверяем заново с DNS
+                    r, ips = probe_tls_only(item[0], item[1], args)
+                else:
+                    r = diagnose(item[0], item[1], prev, ips, args)
                 r["ms"] += prev["ms"]
                 r["tries"] = 2
                 state[k] = (item, r, ips)
