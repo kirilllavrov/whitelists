@@ -122,19 +122,20 @@ def dig_query(domain, resolver, timeout):
     return rcode, sorted(ips)
 
 
-def resolve_a(domain, resolver, timeout, attempts=4):
-    """До attempts запросов A. Возвращает (rcode, адреса) последнего запроса.
+def resolve_a(domain, resolver, timeout, attempts=5):
+    """До attempts запросов A, до первого ответа с адресами.
 
-    Повтор — только если адресов нет и сервер не ответил однозначно:
-    первый запрос на мобильном канале часто теряется, а SERVFAIL бывает
-    разовым. NOERROR без адресов и NXDOMAIN — окончательный ответ.
+    Возвращает (rcode, адреса) последнего запроса. Повтор — при любом
+    ответе без адресов: на мобильном канале запрос теряется, а DNS
+    оператора иногда быстро отвечает пустым NOERROR или SERVFAIL и для
+    существующих доменов (в прогоне МТС так «пропали» reg.ru и timeweb.*).
     """
     rcode, ips = "", []
     for i in range(attempts):
         if i:
             time.sleep(0.4)
         rcode, ips = dig_query(domain, resolver, timeout)
-        if ips or rcode in ("NOERROR", "NXDOMAIN"):
+        if ips:
             break
     return rcode, ips
 
@@ -327,9 +328,11 @@ def tls_round(domain, ips, args, stop_on_allow=False, timeout=None, sni=None):
 
 
 # Итоги, после которых второй проход не нужен: TLS прошёл, DNS ответил
-# заглушкой, DNS однозначно ответил «адресов нет», либо по 80 показан портал
-# оператора. dns_error сюда не входит: второй проход повторяет домен целиком.
-TERMINAL = ("allow", "allow_tls", "blocked_dns", "no_dns", "blocked_portal")
+# заглушкой, либо по 80 показан портал оператора. no_dns и dns_error сюда
+# не входят: пустой ответ DNS оператора бывает сбоем, и второй проход —
+# уже в другое время — проверяет такой домен заново, начиная с DNS.
+TERMINAL = ("allow", "allow_tls", "blocked_dns", "blocked_portal")
+DNS_RECHECK = ("no_dns", "dns_error")
 
 
 def probe_tls_only(name, kind, args):
@@ -404,8 +407,8 @@ def probe_tls_only(name, kind, args):
 def diagnose(name, kind, prev, ips, args):
     """Проход 2: медленные повторы TLS для тех, кто не прошёл первый.
 
-    Портал и ответы DNS уже отсеяны в первом проходе, здесь остаются только
-    неоднозначные отказы (dns_error main проверяет заново через
+    Портал и заглушки DNS уже отсеяны в первом проходе, здесь остаются только
+    неоднозначные отказы (no_dns и dns_error main проверяет заново через
     probe_tls_only, а не здесь). На мобильном канале первый отказ часто оказывается
     потерей пакета, поэтому таймаут утраивается. Если TLS прошёл — статус
     становится allow, иначе остаётся то, что дал первый проход.
@@ -596,7 +599,7 @@ def main():
         try:
             for j, k in enumerate(need, 1):
                 item, prev, ips = state[k]
-                if prev["status"] == "dns_error":
+                if prev["status"] in DNS_RECHECK:
                     # адресов нет — повторять TLS не с чем, проверяем заново с DNS
                     r, ips = probe_tls_only(item[0], item[1], args)
                 else:
