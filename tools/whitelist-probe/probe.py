@@ -448,8 +448,9 @@ def expand_targets(lines, kind, max_cidr):
         if "\t" in s:
             source, s = s.split("\t", 1)
             source = source.strip()
-        s = s.strip()
-        if not s or s.startswith("#"):
+        # комментарий бывает и в конце строки: «domain.ru   # описание»
+        s = s.split("#", 1)[0].strip()
+        if not s:
             continue
         if "/" in s and CIDR_RE.match(s):
             try:
