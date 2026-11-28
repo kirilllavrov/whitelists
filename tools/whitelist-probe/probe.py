@@ -82,8 +82,9 @@ def norm_domain(raw):
         return ""
     if "://" in s:
         s = s.split("://", 1)[1]
-    s = s.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-    s = s.split("@")[-1].split(":", 1)[0].strip(".")
+    s = s.split("#", 1)[0].strip()
+    s = s.split("/", 1)[0].split("?", 1)[0]
+    s = s.split("@")[-1].split(":", 1)[0].strip().strip(".")
     if not s:
         return ""
     try:
@@ -450,6 +451,10 @@ def expand_targets(lines, kind, max_cidr):
             source = source.strip()
         s = s.strip()
         if not s or s.startswith("#"):
+            continue
+        # строка вида «домен  # комментарий» — дальше идёт только значение
+        s = s.split("#", 1)[0].strip()
+        if not s:
             continue
         if "/" in s and CIDR_RE.match(s):
             try:
